@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <rect x="0" y="0" width="32" height="32" rx="6" fill="#1E2B4F"/>
+  <line x1="3" y1="29" x2="29" y2="29" stroke="#fff" stroke-width="0.8" opacity="0.3" stroke-linecap="round"/>
+  <rect x="10" y="2.5" width="12" height="26" rx="1.5" fill="#1E2B4F"/>
+  <rect x="10" y="2.5" width="12" height="26" rx="1.5" fill="none" stroke="#6B7A99" stroke-width="0.7"/>
+  <rect x="12" y="5" width="2.5" height="2" rx="0.5" fill="#fff" opacity="0.8"/>
+  <rect x="17.5" y="5" width="2.5" height="2" rx="0.5" fill="#fff" opacity="0.8"/>
+  <rect x="12" y="9.5" width="2.5" height="2" rx="0.5" fill="#fff" opacity="0.8"/>
+  <rect x="17.5" y="9.5" width="2.5" height="2" rx="0.5" fill="#fff" opacity="0.8"/>
+  <rect x="12" y="14" width="2.5" height="2" rx="0.5" fill="#fff" opacity="0.8"/>
+  <rect x="17.5" y="14" width="2.5" height="2" rx="0.5" fill="#fff" opacity="0.8"/>
+  <rect x="12" y="18.5" width="2.5" height="2" rx="0.5" fill="#fff" opacity="0.8"/>
+  <rect x="17.5" y="18.5" width="2.5" height="2" rx="0.5" fill="#E07B2A"/>
+  <rect x="14" y="23" width="4" height="5.5" rx="0.8" fill="#fff" opacity="0.4"/>
+</svg>

@@ -1,0 +1,261 @@
+{
+  "meta": {
+    "building": "Meridian Business Center",
+    "total_tests": 120,
+    "version": "1.0",
+    "description": "Test suite for Atrio RAG chatbot. expected_in_response: plain strings (AND); nested arrays (OR). Optional expected_category_any / expected_priority_any accept any listed value. See backend/test_rag.py."
+  },
+
+  "groups": [
+
+    {
+      "group": "INFORMATIONAL — Building basics",
+      "description": "General questions about the building. Should NOT create tickets. Should answer from knowledge base.",
+      "tests": [
+        { "id": "INFO-01", "message": "What are the building opening hours?", "should_create_ticket": false, "expected_in_response": [["07:00", "7:00", "07.00"], ["21:00", "21.00", "9:00 pm", "9pm", "9:00pm"], ["Monday", "Mon"], ["Friday", "Fri"]], "notes": "Should mention both main entrance hours and 24/7 side entrance" },
+        { "id": "INFO-02", "message": "What's the building address?", "should_create_ticket": false, "expected_in_response": ["Graanstraat 12", "4811", "Breda"], "notes": "" },
+        { "id": "INFO-03", "message": "How do I get here from the train station?", "should_create_ticket": false, "expected_in_response": [["Breda Centraal", "Breda Centraal Station", "train station", "centraal"], ["8 min", "8-minute", "8 minute", "eight-minute", "8 min.", "minutes walk", "minute walk"], "Willemstraat"], "notes": "Should give walking directions" },
+        { "id": "INFO-04", "message": "What floors does the building have?", "should_create_ticket": false, "expected_in_response": [["6", "six", "0-5", "0–5", "five", "5 floors", "6 floors", "six floors", "six levels"], ["ground", "floor 0", "lobby", "ground floor"], ["roof", "rooftop", "terrace", "top floor", "floor 5"]], "notes": "Should list floors 0-5 or describe layout" },
+        { "id": "INFO-05", "message": "Who manages this building?", "should_create_ticket": false, "expected_in_response": [["VanDalen", "Van Dalen", "van dalen", "Vandalen"], ["Facility", "facility services", "facility management"]], "notes": "Should mention VanDalen Facility Services" },
+        { "id": "INFO-06", "message": "What's the phone number for reception?", "should_create_ticket": false, "expected_in_response": [["076 555 0100", "76 555 01 00", "+31 76 555 01 00", "+31765550100", "0765550100", "555 0100"]], "notes": "" },
+        { "id": "INFO-07", "message": "How do I contact the facility manager?", "should_create_ticket": false, "expected_in_response": ["Jeroen", "van Dijk", "0101"], "notes": "Should give name, phone, and email" },
+        { "id": "INFO-08", "message": "What's the emergency number for the building?", "should_create_ticket": false, "expected_in_response": ["0199", "112"], "notes": "Should mention both building hotline and 112" },
+        { "id": "INFO-09", "message": "When was this building built?", "should_create_ticket": false, "expected_in_response": ["2017"], "notes": "May also mention 2023 renovation" },
+        { "id": "INFO-10", "message": "How many people can the building hold?", "should_create_ticket": false, "expected_in_response": ["520"], "notes": "" }
+      ]
+    },
+
+    {
+      "group": "INFORMATIONAL — WiFi & IT",
+      "description": "IT-related questions. Should NOT create tickets.",
+      "tests": [
+        { "id": "IT-01", "message": "What's the WiFi password?", "should_create_ticket": false, "expected_in_response": ["Meridian-Tenant", "WPA3", "credentials"], "notes": "Should explain there are individual credentials, not a shared password" },
+        { "id": "IT-02", "message": "How do I connect to WiFi?", "should_create_ticket": false, "expected_in_response": ["Meridian-Tenant", "Meridian-Guest"], "notes": "Should explain both networks" },
+        { "id": "IT-03", "message": "Is there a guest WiFi?", "should_create_ticket": false, "expected_in_response": ["Meridian-Guest", "50 Mbps", "8 hours"], "notes": "" },
+        { "id": "IT-04", "message": "How do I get WiFi credentials for a new employee?", "should_create_ticket": false, "expected_in_response": ["it@meridian-breda.nl", "1 business day"], "notes": "" },
+        { "id": "IT-05", "message": "Can I use the Ethernet ports in my office?", "should_create_ticket": false, "expected_in_response": ["Cat6a", "1 Gbps", "it@meridian-breda.nl"], "notes": "Should mention activation needed" },
+        { "id": "IT-06", "message": "Where are the printers?", "should_create_ticket": false, "expected_in_response": ["print room", "each floor"], "notes": "" },
+        { "id": "IT-07", "message": "How do I print something?", "should_create_ticket": false, "expected_in_response": [["WiFi", "wifi", "wi-fi", "wireless", "network"], ["HP", "hewlett", "laserjet", "printer", "print room"]], "notes": "Should mention connecting via WiFi" },
+        { "id": "IT-08", "message": "Can I rent server rack space?", "should_create_ticket": false, "expected_in_response": ["Room 411", "150", "4U"], "notes": "Should mention pricing and how to request" }
+      ]
+    },
+
+    {
+      "group": "INFORMATIONAL — Parking & transport",
+      "description": "Parking and transportation questions. Should NOT create tickets.",
+      "tests": [
+        { "id": "PARK-01", "message": "Where can I park my car?", "should_create_ticket": false, "expected_in_response": [["parking garage", "garage", "underground parking", "parking"], "Parkstraat", ["85", "eighty-five", "spaces", "parking spaces"]], "notes": "Should mention underground garage" },
+        { "id": "PARK-02", "message": "How much does parking cost?", "should_create_ticket": false, "expected_in_response": ["125", "75"], "notes": "Should mention reserved and shared pool prices" },
+        { "id": "PARK-03", "message": "Is there bicycle parking?", "should_create_ticket": false, "expected_in_response": ["120", "indoor", "Parkstraat"], "notes": "" },
+        { "id": "PARK-04", "message": "Can I charge my electric car here?", "should_create_ticket": false, "expected_in_response": ["8", ["22 kW", "22kw", "22 kw"], ["Type 2", "type-2", "type 2", "type2"], ["0.30", "0,30", "30 cent", "per kwh", "kwh"]], "notes": "Should mention number of chargers, type, and cost" },
+        { "id": "PARK-05", "message": "How do I register for EV charging?", "should_create_ticket": false, "expected_in_response": ["reception", "badge", "1 business day"], "notes": "" },
+        { "id": "PARK-06", "message": "Is there visitor parking?", "should_create_ticket": false, "expected_in_response": ["2", "P01", "P02", "4 hours"], "notes": "" },
+        { "id": "PARK-07", "message": "Where can I charge my e-bike?", "should_create_ticket": false, "expected_in_response": ["6", "outlets", "ground floor"], "notes": "Should mention bring your own charger" },
+        { "id": "PARK-08", "message": "How do I book the loading dock?", "should_create_ticket": false, "expected_in_response": ["reception", "24 hours", "advance"], "notes": "" }
+      ]
+    },
+
+    {
+      "group": "INFORMATIONAL — Meeting rooms & spaces",
+      "description": "Questions about shared facilities. Should NOT create tickets.",
+      "tests": [
+        { "id": "MEET-01", "message": "How do I book a meeting room?", "should_create_ticket": false, "expected_in_response": ["reception@meridian-breda.nl", "email"], "notes": "" },
+        { "id": "MEET-02", "message": "What meeting rooms are available?", "should_create_ticket": false, "expected_in_response": ["7", "Biesbosch", "Mastbos"], "notes": "Should list some rooms by name" },
+        { "id": "MEET-03", "message": "What's the biggest meeting room?", "should_create_ticket": false, "expected_in_response": ["G01", "Biesbosch", "12"], "notes": "" },
+        { "id": "MEET-04", "message": "Do the meeting rooms have screens?", "should_create_ticket": false, "expected_in_response": [["display", "screen", "monitor", "projector"], "HDMI", "USB-C", ["wireless", "wi-fi", "wifi", "airplay", "miracast", "casting"]], "notes": "" },
+        { "id": "MEET-05", "message": "Is the rooftop terrace open?", "should_create_ticket": false, "expected_in_response": ["May", "September"], "notes": "Should mention seasonal opening" },
+        { "id": "MEET-06", "message": "What time does the café close?", "should_create_ticket": false, "expected_in_response": ["16:00"], "notes": "" },
+        { "id": "MEET-07", "message": "Can I order catering for a meeting?", "should_create_ticket": false, "expected_in_response": ["catering@meridian-breda.nl", "24 hours"], "notes": "" },
+        { "id": "MEET-08", "message": "Is there a lunch menu available?", "should_create_ticket": false, "expected_in_response": ["11:30", "14:00", "sandwiches", "soup"], "notes": "" }
+      ]
+    },
+
+    {
+      "group": "INFORMATIONAL — Security & access",
+      "description": "Access control and security questions. Should NOT create tickets.",
+      "tests": [
+        { "id": "SEC-01", "message": "How do I get an access badge for a new employee?", "should_create_ticket": false, "expected_in_response": ["reception@meridian-breda.nl", "2 business days", "25"], "notes": "" },
+        { "id": "SEC-02", "message": "Can I enter the building on weekends?", "should_create_ticket": false, "expected_in_response": [["24/7", "24-7", "24 hours", "at all hours", "any time", "always", "seven days"], ["side entrance", "side door", "after-hours"], "Parkstraat", ["badge", "access card", "key card", "pass"]], "notes": "" },
+        { "id": "SEC-03", "message": "How does the visitor registration work?", "should_create_ticket": false, "expected_in_response": ["reception", "temporary", "badge"], "notes": "" },
+        { "id": "SEC-04", "message": "Are there security cameras in the building?", "should_create_ticket": false, "expected_in_response": ["CCTV", "lobby", "parking", "30 days"], "notes": "Should mention where cameras are and where they are NOT" },
+        { "id": "SEC-05", "message": "Where is the smoking area?", "should_create_ticket": false, "expected_in_response": ["Parkstraat", "outside"], "notes": "" },
+        { "id": "SEC-06", "message": "Can I bring my dog to the office?", "should_create_ticket": false, "expected_in_response": ["not allowed", "assistance dog", "permission"], "notes": "Should mention exception for assistance dogs" }
+      ]
+    },
+
+    {
+      "group": "INFORMATIONAL — Cleaning & waste",
+      "description": "Cleaning and sustainability questions. Should NOT create tickets.",
+      "tests": [
+        { "id": "CLEAN-01", "message": "When does the cleaning team come?", "should_create_ticket": false, "expected_in_response": ["18:00", "21:00", "Monday", "Friday"], "notes": "" },
+        { "id": "CLEAN-02", "message": "How do I separate waste here?", "should_create_ticket": false, "expected_in_response": ["gray", "blue", "green", "yellow"], "notes": "Should explain bin colors" },
+        { "id": "CLEAN-03", "message": "Where do I throw away batteries?", "should_create_ticket": false, "expected_in_response": ["reception", "collection box"], "notes": "" },
+        { "id": "CLEAN-04", "message": "When does the fridge get cleaned out?", "should_create_ticket": false, "expected_in_response": ["Friday", "16:00"], "notes": "Should warn about labeling items" },
+        { "id": "CLEAN-05", "message": "How do I dispose of old electronics?", "should_create_ticket": false, "expected_in_response": ["reception", "e-waste"], "notes": "" },
+        { "id": "CLEAN-06", "message": "Do you have shredders for confidential documents?", "should_create_ticket": false, "expected_in_response": ["print room", "shredder"], "notes": "May also mention locked destruction bin option" }
+      ]
+    },
+
+    {
+      "group": "TICKET — HVAC issues",
+      "description": "Real HVAC problems. Should create tickets with category HVAC.",
+      "tests": [
+        { "id": "HVAC-01", "message": "The AC in room 204 is making a loud grinding noise and blowing warm air", "should_create_ticket": true, "expected_category": "HVAC", "expected_priority": "HIGH", "notes": "Clear HVAC fault with location" },
+        { "id": "HVAC-02", "message": "My office (suite 305) is freezing cold, the heating doesn't work at all", "should_create_ticket": true, "expected_category": "HVAC", "expected_priority": "HIGH", "notes": "" },
+        { "id": "HVAC-03", "message": "There's a weird musty smell coming from the air vents on floor 2", "should_create_ticket": true, "expected_category": "HVAC", "expected_priority": "NORMAL", "notes": "Could indicate dirty filter or mold" },
+        { "id": "HVAC-04", "message": "The thermostat in room 412 shows a blank screen", "should_create_ticket": true, "expected_category": "HVAC", "expected_priority": "NORMAL", "notes": "Likely battery issue" },
+        { "id": "HVAC-05", "message": "Suite 108 is extremely hot, we've turned the AC to max but nothing happens", "should_create_ticket": true, "expected_category": "HVAC", "expected_priority": "HIGH", "notes": "" },
+        { "id": "HVAC-06", "message": "There's water dripping from the ceiling unit in room 301", "should_create_ticket": true, "expected_category": "HVAC", "expected_priority": "URGENT", "notes": "Blocked condensate drain — water damage risk" },
+        { "id": "HVAC-07", "message": "The ventilation in the 3rd floor kitchen makes a loud rattling sound", "should_create_ticket": true, "expected_category": "HVAC", "expected_priority": "NORMAL", "notes": "" },
+        { "id": "HVAC-08", "message": "I can feel a strong draft coming from the window in suite 201 even though it's closed", "should_create_ticket": true, "expected_category": "HVAC", "expected_priority": "NORMAL", "notes": "Sealing issue" }
+      ]
+    },
+
+    {
+      "group": "TICKET — Electrical issues",
+      "description": "Electrical problems. Should create tickets with category Electrical.",
+      "tests": [
+        { "id": "ELEC-01", "message": "The lights in the parking garage level B1 have been flickering for three days", "should_create_ticket": true, "expected_category": "Electrical", "expected_priority": "NORMAL", "notes": "" },
+        { "id": "ELEC-02", "message": "A power outlet in suite 407 is sparking when I plug something in", "should_create_ticket": true, "expected_category_any": ["Electrical", "Safety"], "expected_priority": "URGENT", "notes": "Sparking = fire risk = urgent; Safety or Electrical acceptable" },
+        { "id": "ELEC-03", "message": "Half the lights on the 2nd floor hallway are not working", "should_create_ticket": true, "expected_category": "Electrical", "expected_priority": "NORMAL", "notes": "" },
+        { "id": "ELEC-04", "message": "The entire suite 310 lost power, nothing works", "should_create_ticket": true, "expected_category": "Electrical", "expected_priority": "HIGH", "notes": "Tripped breaker likely" },
+        { "id": "ELEC-05", "message": "The emergency exit sign above the stairwell on floor 4 is off", "should_create_ticket": true, "expected_category_any": ["Electrical", "Safety"], "expected_priority": "URGENT", "notes": "Exit lighting failure; Safety or Electrical acceptable" },
+        { "id": "ELEC-06", "message": "The EV charger at spot P47 is showing an error and won't start charging", "should_create_ticket": true, "expected_category": "Electrical", "expected_priority": "NORMAL", "notes": "" },
+        { "id": "ELEC-07", "message": "There's a burning smell coming from the outlet behind the printer on floor 1", "should_create_ticket": true, "expected_category": "Electrical", "expected_priority": "URGENT", "notes": "Potential fire hazard" }
+      ]
+    },
+
+    {
+      "group": "TICKET — Plumbing issues",
+      "description": "Water and plumbing problems. Should create tickets with category Plumbing.",
+      "tests": [
+        { "id": "PLMB-01", "message": "There's water leaking from the ceiling in the men's bathroom on floor 2", "should_create_ticket": true, "expected_category": "Plumbing", "expected_priority": "URGENT", "notes": "Ceiling leak = urgent" },
+        { "id": "PLMB-02", "message": "The toilet on the 3rd floor women's bathroom is clogged and overflowing", "should_create_ticket": true, "expected_category": "Plumbing", "expected_priority": "URGENT", "notes": "" },
+        { "id": "PLMB-03", "message": "The tap in the floor 2 kitchen won't stop dripping", "should_create_ticket": true, "expected_category": "Plumbing", "expected_priority": "NORMAL", "notes": "" },
+        { "id": "PLMB-04", "message": "There's no hot water on floor 4", "should_create_ticket": true, "expected_category": "Plumbing", "expected_priority": "HIGH", "notes": "" },
+        { "id": "PLMB-05", "message": "The kitchen drain on floor 1 is very slow, water takes forever to drain", "should_create_ticket": true, "expected_category": "Plumbing", "expected_priority": "NORMAL", "notes": "" },
+        { "id": "PLMB-06", "message": "The dishwasher in the floor 3 kitchen is leaking water on the floor", "should_create_ticket": true, "expected_category": "Plumbing", "expected_priority": "HIGH", "notes": "" },
+        { "id": "PLMB-07", "message": "The toilet in suite 301 has been running nonstop since yesterday", "should_create_ticket": true, "expected_category": "Plumbing", "expected_priority": "HIGH", "notes": "Water waste" },
+        { "id": "PLMB-08", "message": "There's a puddle forming under the sink in the ground floor accessible bathroom", "should_create_ticket": true, "expected_category": "Plumbing", "expected_priority": "HIGH", "notes": "" }
+      ]
+    },
+
+    {
+      "group": "TICKET — Safety issues",
+      "description": "Safety, fire, structural. Should create tickets with category Safety, usually URGENT.",
+      "tests": [
+        { "id": "SAFE-01", "message": "I think I smell gas near the boiler room area on floor 5", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "URGENT", "notes": "Gas = always urgent" },
+        { "id": "SAFE-02", "message": "The fire alarm went off briefly on floor 3 but stopped after a minute", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "URGENT", "notes": "Even brief alarms need investigation" },
+        { "id": "SAFE-03", "message": "A smoke detector in corridor 5B keeps beeping every 30 seconds", "should_create_ticket": true, "expected_category": "Safety", "expected_priority_any": ["HIGH", "URGENT"], "notes": "Likely low battery; HIGH or URGENT acceptable" },
+        { "id": "SAFE-04", "message": "There's a broken window in the stairwell between floor 1 and 2, glass on the floor", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "URGENT", "notes": "Injury risk + security breach" },
+        { "id": "SAFE-05", "message": "The fire exit door on floor 4 is blocked by someone's furniture", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "URGENT", "notes": "Fire code violation" },
+        { "id": "SAFE-06", "message": "Water is pouring from the ceiling onto electrical equipment in suite 210", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "URGENT", "notes": "Water + electricity = immediate danger" },
+        { "id": "SAFE-07", "message": "The handrail in stairwell B is loose and wobbly", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "HIGH", "notes": "Fall risk" },
+        { "id": "SAFE-08", "message": "I found a crack running along the ceiling in suite 405, it wasn't there last week", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "HIGH", "notes": "Structural concern" },
+        { "id": "SAFE-09", "message": "The AED on the ground floor has a flashing red light, I think something is wrong with it", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "URGENT", "notes": "Medical equipment failure" },
+        { "id": "SAFE-10", "message": "An unauthorized person followed me through the Parkstraat entrance without badging in", "should_create_ticket": true, "expected_category": "Safety", "expected_priority_any": ["HIGH", "URGENT"], "notes": "Security breach / tailgating" }
+      ]
+    },
+
+    {
+      "group": "TICKET — General / other issues",
+      "description": "Miscellaneous maintenance issues. Should create tickets with category General.",
+      "tests": [
+        { "id": "GEN-01", "message": "The elevator has been stuck on the 3rd floor for 20 minutes with the doors open", "should_create_ticket": true, "expected_category": "General", "expected_priority": "HIGH", "notes": "Elevator malfunction" },
+        { "id": "GEN-02", "message": "The lock on the main entrance door is jammed, staff can't get in", "should_create_ticket": true, "expected_category": "General", "expected_priority": "URGENT", "notes": "Access blocked" },
+        { "id": "GEN-03", "message": "The coffee machine in the 3rd floor kitchen is leaking water everywhere", "should_create_ticket": true, "expected_category": "Plumbing", "expected_priority": "URGENT", "notes": "Spreading water = slip/damage risk; Plumbing preferred" },
+        { "id": "GEN-04", "message": "Several ceiling tiles in the hallway on floor 2 are sagging and look like they might fall", "should_create_ticket": true, "expected_category": "General", "expected_priority": "HIGH", "notes": "" },
+        { "id": "GEN-05", "message": "The automatic door at the main entrance is not closing properly, it stays open", "should_create_ticket": true, "expected_category": "General", "expected_priority": "HIGH", "notes": "Security + energy waste" },
+        { "id": "GEN-06", "message": "The carpet in suite 302 has a large stain and smells bad", "should_create_ticket": true, "expected_category": "General", "expected_priority": "NORMAL", "notes": "Cleaning issue" },
+        { "id": "GEN-07", "message": "The blinds in room 209 are broken and stuck halfway", "should_create_ticket": true, "expected_category": "General", "expected_priority": "LOW", "notes": "" },
+        { "id": "GEN-08", "message": "The soap dispenser in the men's room on floor 1 is empty", "should_create_ticket": true, "expected_category": "General", "expected_priority": "LOW", "notes": "Restocking needed" }
+      ]
+    },
+
+    {
+      "group": "EDGE CASE — Questions that hide problems",
+      "description": "Phrased as questions but actually indicate issues. Should create tickets.",
+      "tests": [
+        { "id": "EDGE-01", "message": "Is the hot water supposed to be brown?", "should_create_ticket": true, "expected_category": "Plumbing", "expected_priority": "HIGH", "notes": "Rusty water = real problem" },
+        { "id": "EDGE-02", "message": "Is it normal that the wall in room 108 is wet?", "should_create_ticket": true, "expected_category": "Plumbing", "expected_priority": "URGENT", "notes": "Moisture = water damage" },
+        { "id": "EDGE-03", "message": "Do you know if anyone reported the weird smell on floor 2?", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "HIGH", "notes": "Unidentified smell needs investigation" },
+        { "id": "EDGE-04", "message": "Should the emergency exit light be off?", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "URGENT", "notes": "Emergency lighting failure = compliance issue" },
+        { "id": "EDGE-05", "message": "Has the elevator always made that grinding sound?", "should_create_ticket": true, "expected_category": "General", "expected_priority": "HIGH", "notes": "Unusual elevator noise needs inspection" },
+        { "id": "EDGE-06", "message": "Is there a reason the hallway lights are off on floor 3?", "should_create_ticket": true, "expected_category": "Electrical", "expected_priority": "NORMAL", "notes": "Could be planned or could be fault" },
+        { "id": "EDGE-07", "message": "Why does the bathroom on floor 4 always smell like sewage?", "should_create_ticket": true, "expected_category": "Plumbing", "expected_priority": "HIGH", "notes": "Recurring = indicates real problem" },
+        { "id": "EDGE-08", "message": "Is it normal for the ceiling to be that color? It looks yellow/brown in suite 211", "should_create_ticket": true, "expected_category": "Plumbing", "expected_priority": "HIGH", "notes": "Discolored ceiling = possible water leak above" }
+      ]
+    },
+
+    {
+      "group": "EDGE CASE — Complaints vs real issues",
+      "description": "Venting, frustration, vague complaints. Tricky — AI needs to judge if actionable.",
+      "tests": [
+        { "id": "COMP-01", "message": "It's always so hot on the 5th floor", "should_create_ticket": true, "expected_category": "HVAC", "expected_priority": "NORMAL", "notes": "Vague but actionable — HVAC issue on floor 5" },
+        { "id": "COMP-02", "message": "This building is falling apart", "should_create_ticket": false, "expected_in_response": [["specific", "more details", "more detail", "describe", "what exactly", "which", "tell me more", "clarify", "what issue", "could you", "happy to help", "how can i help", "what happened"]], "notes": "Too vague — should ask for specifics" },
+        { "id": "COMP-03", "message": "The bathrooms are disgusting", "should_create_ticket": true, "expected_category": "General", "expected_priority": "NORMAL", "notes": "Actionable — cleaning issue" },
+        { "id": "COMP-04", "message": "I can't work like this, it's absolutely freezing in my office", "should_create_ticket": true, "expected_category": "HVAC", "expected_priority": "HIGH", "notes": "Frustrated tenant but clear issue" },
+        { "id": "COMP-05", "message": "Whoever designed the ventilation system should be fired", "should_create_ticket": false, "expected_in_response": [["specific", "more detail", "describe", "what issue", "which", "tell me", "help", "assist", "how can", "facility", "maintenance"]], "notes": "Just frustration, no actionable problem" },
+        { "id": "COMP-06", "message": "Why is it always so loud near the server room?", "should_create_ticket": true, "expected_category": "General", "expected_priority": "LOW", "notes": "Could be normal but worth investigating" },
+        { "id": "COMP-07", "message": "The cleaning has been terrible lately, the kitchen is always filthy", "should_create_ticket": true, "expected_category": "General", "expected_priority": "NORMAL", "notes": "Cleaning quality complaint — actionable" },
+        { "id": "COMP-08", "message": "I hate this building", "should_create_ticket": false, "expected_in_response": [["help", "specific", "assist", "what can", "how can", "sorry", "tell me more", "describe"]], "notes": "Not actionable" }
+      ]
+    },
+
+    {
+      "group": "EDGE CASE — Not maintenance",
+      "description": "Requests that don't belong in maintenance. Should NOT create tickets.",
+      "tests": [
+        { "id": "NOTM-01", "message": "Can you order more paper towels for the kitchen?", "should_create_ticket": false, "expected_in_response": [["reception", "front desk", "contact"], ["restock", "order", "supplies", "stock", "purchasing"]], "notes": "Supply request, not maintenance — direct to reception" },
+        { "id": "NOTM-02", "message": "We need more chairs in meeting room G01", "should_create_ticket": false, "expected_in_response": [["reception", "front desk", "facility", "office services"], ["facility", "furniture", "chairs", "ordering", "contact"]], "notes": "Furniture request" },
+        { "id": "NOTM-03", "message": "Can you move my desk closer to the window?", "should_create_ticket": false, "expected_in_response": [["office", "tenant", "employer", "hr"], ["arrangement", "layout", "move", "reconfigure", "facilities", "reception"]], "notes": "Internal office arrangement" },
+        { "id": "NOTM-04", "message": "The vending machine ate my money", "should_create_ticket": false, "expected_in_response": [["vending", "machine", "snack"], ["reception", "front desk", "contact", "operator"]], "notes": "Third-party vendor issue" },
+        { "id": "NOTM-05", "message": "I'd like to request a key card for my new employee", "should_create_ticket": false, "expected_in_response": ["reception@meridian-breda.nl", "badge", "25"], "notes": "Admin request — should give instructions" },
+        { "id": "NOTM-06", "message": "What's the rent for suite 205?", "should_create_ticket": false, "expected_in_response": ["Vestia", "property", "lease"], "notes": "Lease question — should redirect to property manager" },
+        { "id": "NOTM-07", "message": "Can I put a sign on the outside of the building?", "should_create_ticket": false, "expected_in_response": [["not allowed", "not permitted", "prohibited", "may not", "requires approval", "need approval"], ["approval", "permission", "written", "landlord", "owner"], ["building owner", "owner", "vestia", "property manager", "landlord"]], "notes": "" },
+        { "id": "NOTM-08", "message": "I want to paint my office walls a different color", "should_create_ticket": false, "expected_in_response": [["not allowed", "not permitted", "prohibited", "requires approval", "need approval"], ["approval", "permission", "written", "landlord", "owner"], ["written", "approval", "owner", "vestia"]], "notes": "Per building rules - modification needs owner approval" }
+      ]
+    },
+
+    {
+      "group": "EDGE CASE — Follow-ups and non-issues",
+      "description": "Messages that are not new issues. Should NOT create tickets.",
+      "tests": [
+        { "id": "FUP-01", "message": "Any update on my AC issue?", "should_create_ticket": false, "expected_in_response": [["ticket", "request", "work order", "case", "reference"], ["status", "update", "track", "check", "portal", "number"]], "notes": "Asking about existing issue" },
+        { "id": "FUP-02", "message": "The problem I reported yesterday is now worse", "should_create_ticket": true, "expected_category": "General", "expected_priority": "HIGH", "notes": "Tricky — could be update OR new ticket. Escalation = new ticket is acceptable." },
+        { "id": "FUP-03", "message": "Thanks, the plumber already came and fixed it", "should_create_ticket": false, "expected_in_response": [["glad", "great", "good", "happy", "pleased", "welcome", "wonderful"], ["resolved", "fixed", "sorted", "hear"]], "notes": "Confirmation, not a new issue" },
+        { "id": "FUP-04", "message": "Never mind, it fixed itself", "should_create_ticket": false, "expected_in_response": [["glad", "good", "great", "fine", "okay", "alright"], ["know", "hear", "thanks", "let us", "reach out", "back", "anytime"]], "notes": "Cancellation" },
+        { "id": "FUP-05", "message": "Hello", "should_create_ticket": false, "expected_in_response": [["hello", "hi", "hey", "good morning", "good afternoon", "welcome"], ["help", "assist", "how can", "what can", "facility", "building", "assistant", "fm"]], "notes": "Greeting" },
+        { "id": "FUP-06", "message": "test test test", "should_create_ticket": false, "expected_in_response": [], "notes": "Gibberish / testing" },
+        { "id": "FUP-07", "message": "asdfghjkl", "should_create_ticket": false, "expected_in_response": [], "notes": "Gibberish" },
+        { "id": "FUP-08", "message": "Can your AI do my homework?", "should_create_ticket": false, "expected_in_response": ["facility", "building", "help"], "notes": "Off-topic, should redirect to FM purpose" }
+      ]
+    },
+
+    {
+      "group": "EDGE CASE — Multi-issue and complex",
+      "description": "Messages with multiple problems or requiring nuanced handling.",
+      "tests": [
+        { "id": "MULTI-01", "message": "The AC doesn't work in 204, the lights are flickering in 205, and there's no hot water on floor 3", "should_create_ticket": true, "expected_category": "HVAC", "expected_priority": "HIGH", "notes": "Multiple issues — should create at least 1 ticket, ideally noting all 3 problems" },
+        { "id": "MULTI-02", "message": "Room 301 has a broken blind and the door handle fell off", "should_create_ticket": true, "expected_category": "General", "expected_priority": "NORMAL", "notes": "Two minor issues, one ticket is fine" },
+        { "id": "MULTI-03", "message": "Every morning when I arrive at suite 405, it's freezing cold and it takes 2 hours for the heating to kick in. This has been happening for 3 weeks now.", "should_create_ticket": true, "expected_category": "HVAC", "expected_priority": "HIGH", "notes": "Recurring issue — should note the pattern" },
+        { "id": "MULTI-04", "message": "I'm not sure if this is important but there's a small puddle forming under the fire extinguisher on floor 2 near stairwell A", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "URGENT", "notes": "Tenant unsure but important — fire equipment + water" },
+        { "id": "MULTI-05", "message": "We had a meeting in Biesbosch and the screen kept disconnecting, the room was too warm, and there were no whiteboard markers", "should_create_ticket": true, "expected_category": "General", "expected_priority": "NORMAL", "notes": "Multiple minor meeting room issues" },
+        { "id": "MULTI-06", "message": "I work on the 4th floor and lately the elevator always skips floor 4. Also the hallway smells weird.", "should_create_ticket": true, "expected_category": "General", "expected_priority": "HIGH", "notes": "Elevator + smell — two different systems" }
+      ]
+    },
+
+    {
+      "group": "EDGE CASE — Urgency testing",
+      "description": "Testing if AI correctly identifies truly urgent situations.",
+      "tests": [
+        { "id": "URG-01", "message": "THERE IS WATER POURING FROM THE CEILING ALL OVER OUR COMPUTERS", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "URGENT", "notes": "ALL CAPS = panicked tenant, water + electronics = urgent" },
+        { "id": "URG-02", "message": "One of the ceiling tiles is a bit loose in the hallway", "should_create_ticket": true, "expected_category": "General", "expected_priority": "LOW", "notes": "Minor — low priority" },
+        { "id": "URG-03", "message": "I see smoke coming from the electrical panel on floor 1", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "URGENT", "notes": "Potential fire — should also recommend calling 112" },
+        { "id": "URG-04", "message": "The stairwell is pitch dark, all lights are off and the emergency lights aren't on either", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "URGENT", "notes": "Emergency lighting failure in escape route" },
+        { "id": "URG-05", "message": "Small scratch on the wall near the elevator on floor 2", "should_create_ticket": true, "expected_category": "General", "expected_priority": "LOW", "notes": "Cosmetic only" },
+        { "id": "URG-06", "message": "The sprinkler head in suite 402 is dripping water even though there's no fire", "should_create_ticket": true, "expected_category": "Safety", "expected_priority": "URGENT", "notes": "Malfunctioning fire suppression system" }
+      ]
+    }
+  ]
+}

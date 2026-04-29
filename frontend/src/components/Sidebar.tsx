@@ -20,6 +20,7 @@ export function Sidebar() {
         { href: "/chat", label: "Chat" },
         { href: "/dashboard", label: "Tickets" },
         { href: "/admin", label: "Admin Settings" },
+        { href: "/admin/training", label: "Training Review" },
       ]
     : role === "user"
       ? [

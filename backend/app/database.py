@@ -23,6 +23,9 @@ from .config import (
     TRAINING_DATA_AUTO_REFRESH_SECONDS,
     TRAINING_DATA_DIR,
 )
+from .training_json_store import export_jsonl as export_jsonl_from_store
+from .training_json_store import build_dataset_view as build_dataset_view_from_store
+from .training_json_store import upsert_candidate as upsert_json_candidate
 
 
 ALLOWED_STATUS = {"Open", "In Progress", "Resolved"}
@@ -71,6 +74,34 @@ def _json_load(value: str, default: Any) -> Any:
 def _normalize_input_text(value: str) -> str:
     cleaned = " ".join((value or "").strip().lower().split())
     return cleaned
+
+
+def _sync_json_store_from_training_example(item: dict[str, Any]) -> None:
+    try:
+        upsert_json_candidate(
+            {
+                "id": item.get("id"),
+                "input": item.get("input_text", ""),
+                "actual_output": item.get("actual_output", {}),
+                "ideal_output": item.get("ideal_output") or item.get("actual_output", {}),
+                "human_notes": item.get("human_notes", ""),
+                "correction_type": item.get("correction_type", "pending"),
+                "context_used": item.get("context_used", []),
+                "reasoning": item.get("reasoning", ""),
+                "source_type": item.get("source_type", ""),
+                "source_id": item.get("source_id", ""),
+                "source_ref": item.get("source_ref", ""),
+                "user_role": item.get("user_role", ""),
+                "query_type": item.get("query_type", ""),
+                "ticket_id": item.get("ticket_id"),
+                "created_at": item.get("created_at", _utc_now_iso()),
+                "reviewed_at": item.get("reviewed_at"),
+                "knowledge_gap_logged": bool(item.get("knowledge_gap_logged", False)),
+                "knowledge_gap_reason": item.get("knowledge_gap_reason", ""),
+            }
+        )
+    except Exception:
+        pass
 
 
 def _auto_refresh_v1_dataset_files() -> None:
@@ -586,6 +617,15 @@ def _sync_training_examples_from_override(
                 """,
                 (_json_dump(ideal), human_notes, _utc_now_iso(), int(row["id"])),
             )
+            _sync_json_store_from_training_example(
+                {
+                    **item,
+                    "correction_type": "edited",
+                    "ideal_output": ideal,
+                    "human_notes": human_notes,
+                    "reviewed_at": _utc_now_iso(),
+                }
+            )
             updated += 1
         conn.commit()
     return updated
@@ -1012,7 +1052,10 @@ def create_training_example(
         conn.commit()
         row = conn.execute("SELECT * FROM training_examples WHERE id = ?", (example_id,)).fetchone()
     _auto_refresh_v1_dataset_files()
-    return _hydrate_training_example(row) if row else {}
+    item = _hydrate_training_example(row) if row else {}
+    if item:
+        _sync_json_store_from_training_example(item)
+    return item
 
 
 def get_training_example(example_id: int) -> dict[str, Any]:
@@ -1084,7 +1127,10 @@ def update_training_example_review(
         conn.commit()
         row = conn.execute("SELECT * FROM training_examples WHERE id = ?", (example_id,)).fetchone()
     _auto_refresh_v1_dataset_files()
-    return _hydrate_training_example(row) if row else {}
+    item = _hydrate_training_example(row) if row else {}
+    if item:
+        _sync_json_store_from_training_example(item)
+    return item
 
 
 def export_training_examples_jsonl(
@@ -1216,7 +1262,10 @@ def upsert_review_seed_example(
             )
             conn.commit()
             row = conn.execute("SELECT * FROM training_examples WHERE id = ?", (int(existing["id"]),)).fetchone()
-            return _hydrate_training_example(row) if row else {}
+            item = _hydrate_training_example(row) if row else {}
+            if item:
+                _sync_json_store_from_training_example(item)
+            return item
 
         cur = conn.execute(
             """
@@ -1256,7 +1305,10 @@ def upsert_review_seed_example(
         ex_id = int(cur.lastrowid)
         conn.commit()
         row = conn.execute("SELECT * FROM training_examples WHERE id = ?", (ex_id,)).fetchone()
-    return _hydrate_training_example(row) if row else {}
+    item = _hydrate_training_example(row) if row else {}
+    if item:
+        _sync_json_store_from_training_example(item)
+    return item
 
 
 def backfill_training_examples_from_tickets(limit: int = 5000) -> dict[str, Any]:
@@ -1382,70 +1434,11 @@ def backfill_training_examples_from_test_results(results_path: str) -> dict[str,
 
 
 def build_v1_dataset_view() -> dict[str, Any]:
-    rows = get_training_examples(limit=200000, offset=0)
-    all_rows = list(rows)
-    train_rows = [r for r in all_rows if str(r.get("correction_type")) in {"approved", "edited"}]
-    review_rows = [r for r in all_rows if str(r.get("correction_type")) in {"pending", "rejected"}]
-
-    # Keep dedup stats in manifest for diagnostics only.
-    dedup: dict[str, dict[str, Any]] = {}
-    for row in all_rows:
-        key = str(row.get("normalized_input") or _normalize_input_text(str(row.get("input_text", ""))))
-        if not key:
-            continue
-        if key not in dedup:
-            dedup[key] = row
-            continue
-        dedup[key] = _choose_preferred_example(dedup[key], row)
-    dedup_rows = list(dedup.values())
-    by_category: dict[str, int] = {}
-    by_priority: dict[str, int] = {}
-    by_source: dict[str, int] = {}
-    for row in all_rows:
-        ideal = row.get("ideal_output") or row.get("actual_output") or {}
-        cat = str(ideal.get("category") or "Unknown")
-        pr = str(ideal.get("priority") or "Unknown")
-        src = str(row.get("source_type") or "unknown")
-        by_category[cat] = by_category.get(cat, 0) + 1
-        by_priority[pr] = by_priority.get(pr, 0) + 1
-        by_source[src] = by_source.get(src, 0) + 1
-    return {
-        "all_rows": all_rows,
-        "train_rows": train_rows,
-        "review_rows": review_rows,
-        "manifest": {
-            "total_raw_rows": len(rows),
-            "total_dedup_rows": len(dedup_rows),
-            "train_rows": len(train_rows),
-            "review_rows": len(review_rows),
-            "dedup_ratio": round((1 - (len(dedup_rows) / len(rows))), 4) if rows else 0.0,
-            "by_category": by_category,
-            "by_priority": by_priority,
-            "by_source_type": by_source,
-        },
-    }
+    return build_dataset_view_from_store()
 
 
 def export_v1_jsonl(rows: list[dict[str, Any]]) -> str:
-    lines: list[str] = []
-    for row in rows:
-        ideal = row.get("ideal_output") or row.get("actual_output") or {}
-        rec = {
-            "input": row.get("input_text", ""),
-            "ideal_output": {
-                "category": ideal.get("category"),
-                "priority": ideal.get("priority"),
-                "create_ticket": bool(ideal.get("create_ticket")),
-                "response": ideal.get("response"),
-                "issue_summary": ideal.get("issue_summary"),
-            },
-            "human_notes": row.get("human_notes", ""),
-            "correction_type": row.get("correction_type", "pending"),
-            "context_used": row.get("context_used", []),
-            "reasoning": row.get("reasoning", ""),
-        }
-        lines.append(_json_dump(rec))
-    return "\n".join(lines) + ("\n" if lines else "")
+    return export_jsonl_from_store(rows)
 
 
 def export_v1_review_csv(rows: list[dict[str, Any]]) -> str:

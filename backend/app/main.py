@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from pathlib import Path
 import uvicorn
 from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
@@ -17,6 +19,9 @@ from .config import (
     LLM_MODEL,
     NVIDIA_API_KEY,
     RAG_TOP_K,
+    TRAINING_DATA_AUTO_REFRESH,
+    TRAINING_DATA_AUTO_REFRESH_SECONDS,
+    TRAINING_DATA_DIR,
 )
 from .doc_extract import UPLOAD_ALLOWED_EXTENSIONS, extract_text_from_upload
 from . import mail as mail_notify
@@ -58,9 +63,16 @@ from .database import (
 from .ingest import run_ingest
 from .llm import chat, embed
 from .rag import generate, generate_stream, retrieve_with_sources
+from .training_json_store import (
+    bootstrap_from_examples,
+    get_candidate_for_api,
+    list_candidates_for_api,
+    update_candidate_review_for_api,
+)
 
 
 app = FastAPI(title="FM Chatbot Backend")
+_DATASET_REFRESH_THREAD_STARTED = False
 
 app.add_middleware(
     CORSMiddleware,
@@ -330,6 +342,31 @@ def _doc_path(name: str) -> Path:
 
 def _backend_root() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+def _should_enable_training_auto_refresh() -> bool:
+    return str(TRAINING_DATA_AUTO_REFRESH).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _start_training_dataset_scheduler() -> None:
+    global _DATASET_REFRESH_THREAD_STARTED
+    if _DATASET_REFRESH_THREAD_STARTED:
+        return
+    if not _should_enable_training_auto_refresh():
+        return
+    interval = max(15, int(TRAINING_DATA_AUTO_REFRESH_SECONDS or 60))
+
+    def _runner() -> None:
+        while True:
+            try:
+                write_v1_dataset_files(TRAINING_DATA_DIR)
+            except Exception:
+                pass
+            time.sleep(interval)
+
+    th = threading.Thread(target=_runner, name="training-dataset-refresh", daemon=True)
+    th.start()
+    _DATASET_REFRESH_THREAD_STARTED = True
 
 
 def _auth_cookie_max_age_seconds() -> int:
@@ -1002,6 +1039,11 @@ def _finalize_chat_payload(
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+    try:
+        bootstrap_from_examples(get_training_examples(limit=200000, offset=0))
+    except Exception:
+        pass
+    _start_training_dataset_scheduler()
 
 
 @app.get("/health")
@@ -1569,7 +1611,7 @@ def api_admin_training_examples(
     offset: int = Query(default=0, ge=0),
     _: dict = Depends(_require_admin),
 ) -> dict:
-    rows = get_training_examples(
+    rows = list_candidates_for_api(
         correction_type=correction_type,
         user_role=user_role,
         limit=limit,
@@ -1583,7 +1625,7 @@ def api_admin_training_example_by_id(
     example_id: int,
     _: dict = Depends(_require_admin),
 ) -> dict:
-    item = get_training_example(example_id)
+    item = get_candidate_for_api(example_id)
     if not item:
         raise HTTPException(status_code=404, detail="Training example not found")
     return {"example": item}
@@ -1596,14 +1638,26 @@ def api_admin_training_example_update(
     _: dict = Depends(_require_admin),
 ) -> dict:
     try:
-        item = update_training_example_review(
-            example_id,
+        item = update_candidate_review_for_api(
+            example_id=example_id,
             correction_type=req.correction_type,
             ideal_output=req.ideal_output,
             human_notes=req.human_notes,
             context_used=req.context_used,
             reasoning=req.reasoning,
         )
+        # Keep SQLite mirrored for operational compatibility.
+        try:
+            update_training_example_review(
+                example_id,
+                correction_type=req.correction_type,
+                ideal_output=req.ideal_output,
+                human_notes=req.human_notes,
+                context_used=req.context_used,
+                reasoning=req.reasoning,
+            )
+        except Exception:
+            pass
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not item:
@@ -1685,9 +1739,8 @@ def api_admin_training_examples_v1_build_files(
     test_path = Path(req.test_results_path)
     if not test_path.is_absolute():
         test_path = (_backend_root() / test_path).resolve()
-    if test_path.exists():
-        backfill_training_examples_from_test_results(str(test_path))
-    backfill_training_examples_from_tickets(limit=200000)
+    # JSON-first mode: build-files does not run backfills.
+    # New records should come only from normal chat/test flows and manual review edits.
     out_dir = Path(req.output_dir)
     if not out_dir.is_absolute():
         out_dir = (_backend_root() / out_dir).resolve()

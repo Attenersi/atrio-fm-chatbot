@@ -8,6 +8,20 @@ for future model fine-tuning.
 Capture every executed query as a training-example candidate, then curate it
 into a high-quality JSONL dataset.
 
+## JSON-first source of truth
+
+Canonical store for review state is now:
+
+- `backend/data/fine_tuning_v1_candidates.jsonl`
+
+Operational SQLite (`training_examples`) is still maintained for compatibility,
+but frontend review endpoints are JSON-first and every status edit (`pending`,
+`approved`, `edited`, `rejected`) is persisted directly in the candidates file.
+
+Status compatibility rule:
+
+- `corrected` is normalized to `edited`
+
 ## Canonical training record
 
 Each record should contain:
@@ -79,6 +93,9 @@ Recommended export policy:
 4. For `edited`, admin adjusts `ideal_output`, adds `human_notes`, and `reasoning`.
 5. Admin exports filtered JSONL for training.
 
+Every write path (chat ingestion, test backfill, admin review edit) upserts the
+same canonical candidates file.
+
 ## Data quality rules
 
 - Keep `input` verbatim user phrasing (no paraphrasing).
@@ -125,6 +142,9 @@ Recommended sequence:
 - `data/fine_tuning_v1_review.csv`
 - `data/fine_tuning_v1_train.jsonl`
 - `data/fine_tuning_v1_manifest.json`
+
+Additionally, when auto-refresh is enabled, backend runs periodic rebuilds so
+iterative chat/test updates are reflected in these files without manual action.
 
 ## V1 acceptance checklist
 

@@ -41,7 +41,7 @@ Development:
 Alternative:
 
 ```powershell
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8010
 ```
 
 ## Ingest docs
@@ -74,6 +74,11 @@ This rebuilds the Chroma index from files in `docs_fm/` (or your configured `DOC
 
 Use `test_rag.py` with `atrio_test_cases.json`.
 Runbook: `test_runbook.md`.
+
+## Maintenance scripts
+
+Reusable backend maintenance utilities are in `backend/scripts/`.
+Legacy root entrypoints (for compatibility) may call into this folder.
 
 ## Publish safety and second computer setup
 

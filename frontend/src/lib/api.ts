@@ -1,4 +1,4 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8010";
 
 export type ChatResponse = {
   category: string;
@@ -435,6 +435,37 @@ export async function adminExportTrainingExamples(correctionTypes = "approved,ed
     throw new Error(`Request failed: ${res.status}`);
   }
   return res.text();
+}
+
+export async function adminGetTrainingV1Manifest() {
+  return req("/api/admin/training-examples/v1/manifest") as Promise<Record<string, any>>;
+}
+
+export async function adminExportTrainingV1Jsonl() {
+  const res = await fetch(`${API_URL}/api/admin/training-examples/v1/export-jsonl`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Request failed: ${res.status}`);
+  }
+  return res.text();
+}
+
+export async function adminExportTrainingV1Csv() {
+  const res = await fetch(`${API_URL}/api/admin/training-examples/v1/export-csv`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Request failed: ${res.status}`);
+  }
+  return res.text();
+}
+
+export async function adminBuildTrainingV1Files(payload?: { test_results_path?: string; output_dir?: string }) {
+  return req("/api/admin/training-examples/v1/build-files", {
+    method: "POST",
+    body: JSON.stringify(payload ?? {}),
+  }) as Promise<Record<string, any>>;
 }
 
 export async function adminListResolutionNotes(ticketId: number) {

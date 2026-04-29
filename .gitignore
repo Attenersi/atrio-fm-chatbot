@@ -26,11 +26,6 @@ node_modules/
 frontend/node_modules/
 frontend/.next/
 frontend/.next-dev/
-<<<<<<< Updated upstream
-.cursor/debug-*.log
-SECOND_COMPUTER_SETUP.md
-=======
 
 # Local virtualenv
 venv/
->>>>>>> Stashed changes

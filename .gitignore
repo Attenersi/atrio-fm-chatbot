@@ -17,12 +17,20 @@ backend/data/fine_tuning_v1_manifest.json
 .env
 .env.local
 backend/.env
+backend/env
 frontend/.env.local
+frontend/env.local
 
 # Node
 node_modules/
 frontend/node_modules/
 frontend/.next/
 frontend/.next-dev/
+<<<<<<< Updated upstream
 .cursor/debug-*.log
 SECOND_COMPUTER_SETUP.md
+=======
+
+# Local virtualenv
+venv/
+>>>>>>> Stashed changes

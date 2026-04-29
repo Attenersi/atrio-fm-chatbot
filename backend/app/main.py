@@ -46,7 +46,10 @@ from .database import (
     get_training_examples,
     get_user_by_id,
     init_db,
+    list_active_chat_messages,
     list_users,
+    append_chat_exchange,
+    start_new_chat_thread,
     ticket_stats,
     update_knowledge_gap,
     update_ticket_status,
@@ -58,6 +61,7 @@ from .database import (
     build_v1_dataset_view,
     export_v1_jsonl,
     export_v1_review_csv,
+    rebuild_json_store_from_db,
     write_v1_dataset_files,
 )
 from .ingest import run_ingest
@@ -67,6 +71,7 @@ from .training_json_store import (
     bootstrap_from_examples,
     get_candidate_for_api,
     list_candidates_for_api,
+    mass_mark_all_edited_if_any_custom_reasoning,
     update_candidate_review_for_api,
 )
 
@@ -391,6 +396,27 @@ def _require_admin(user: dict = Depends(_require_auth)) -> dict:
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+def _history_from_active_chat(user: dict, fallback: list[dict[str, str]]) -> list[dict[str, str]]:
+    user_id = int(user.get("id") or 0)
+    if user_id <= 0:
+        return list(fallback)
+    try:
+        payload = list_active_chat_messages(user_id, limit=60)
+    except Exception:
+        return list(fallback)
+    rows = payload.get("messages", [])
+    if not rows:
+        return list(fallback)
+    resolved: list[dict[str, str]] = []
+    for row in rows:
+        role_raw = str(row.get("role", "")).strip().lower()
+        role = "assistant" if role_raw == "assistant" else "user"
+        content = str(row.get("content", "") or "")
+        if content:
+            resolved.append({"role": role, "content": content})
+    return resolved
 
 
 def _safe_stem(name: str) -> str:
@@ -1033,6 +1059,15 @@ def _finalize_chat_payload(
     except Exception:
         # Training log must not break chat flow.
         pass
+    try:
+        append_chat_exchange(
+            int(user.get("id") or 0),
+            req.message,
+            str(payload.get("response", "") or ""),
+        )
+    except Exception:
+        # Chat history persistence must not break chat flow.
+        pass
     return payload
 
 
@@ -1060,6 +1095,7 @@ def health() -> dict[str, str]:
 @app.post("/api/chat")
 def api_chat(req: ChatRequest, user: dict = Depends(_require_auth)) -> dict:
     try:
+        req.history = _history_from_active_chat(user, req.history)
         context, sources = retrieve_with_sources(req.message, k=RAG_TOP_K)
         raw_response = generate(req.message, context, req.history)
     except Exception as exc:
@@ -1087,6 +1123,7 @@ def api_chat_stream(req: ChatRequest, user: dict = Depends(_require_auth)) -> St
 
     def generate_events():
         try:
+            req.history = _history_from_active_chat(user, req.history)
             context, sources = retrieve_with_sources(req.message, k=RAG_TOP_K)
             raw = ""
             streamed_len = 0
@@ -1120,6 +1157,26 @@ def api_chat_stream(req: ChatRequest, user: dict = Depends(_require_auth)) -> St
             yield event({"type": "error", "message": str(exc)})
 
     return StreamingResponse(generate_events(), media_type="text/event-stream")
+
+
+@app.get("/api/chat/history")
+def api_chat_history(
+    limit: int = Query(default=200, ge=1, le=2000),
+    user: dict = Depends(_require_auth),
+) -> dict:
+    user_id = int(user.get("id") or 0)
+    if user_id <= 0:
+        raise HTTPException(status_code=400, detail="Missing user id")
+    return list_active_chat_messages(user_id, limit=limit)
+
+
+@app.post("/api/chat/new")
+def api_chat_new(user: dict = Depends(_require_auth)) -> dict:
+    user_id = int(user.get("id") or 0)
+    if user_id <= 0:
+        raise HTTPException(status_code=400, detail="Missing user id")
+    thread = start_new_chat_thread(user_id)
+    return {"thread": thread}
 
 
 @app.post("/api/embed")
@@ -1747,6 +1804,43 @@ def api_admin_training_examples_v1_build_files(
     result = write_v1_dataset_files(str(out_dir))
     result["test_results_path"] = str(test_path)
     return result
+
+
+@app.post("/api/admin/training-examples/v1/mark-all-edited")
+def api_admin_training_examples_mark_all_edited(
+    _: dict = Depends(_require_admin),
+) -> dict:
+    result = mass_mark_all_edited_if_any_custom_reasoning()
+    return {"ok": True, **result}
+
+
+@app.get("/api/admin/training-examples/v1/sync-check")
+def api_admin_training_examples_sync_check(
+    _: dict = Depends(_require_admin),
+) -> dict:
+    db_rows = get_training_examples(limit=200000, offset=0)
+    db_ids = {int(r.get("id", 0) or 0) for r in db_rows if int(r.get("id", 0) or 0) > 0}
+    view = build_v1_dataset_view()
+    json_ids = {int(r.get("id", 0) or 0) for r in list(view.get("all_rows", [])) if int(r.get("id", 0) or 0) > 0}
+    missing_in_json = sorted(list(db_ids - json_ids))
+    missing_in_db = sorted(list(json_ids - db_ids))
+    return {
+        "ok": True,
+        "db_count": len(db_ids),
+        "json_count": len(json_ids),
+        "missing_in_json_count": len(missing_in_json),
+        "missing_in_db_count": len(missing_in_db),
+        "missing_in_json_sample": missing_in_json[:50],
+        "missing_in_db_sample": missing_in_db[:50],
+    }
+
+
+@app.post("/api/admin/training-examples/v1/rebuild-json-store")
+def api_admin_training_examples_rebuild_json_store(
+    _: dict = Depends(_require_admin),
+) -> dict:
+    result = rebuild_json_store_from_db()
+    return {"ok": True, **result}
 
 
 if __name__ == "__main__":

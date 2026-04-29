@@ -6,7 +6,11 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ENV_FILE = BASE_DIR / ".env"
+ALT_ENV_FILE = BASE_DIR / "env"
 load_dotenv(dotenv_path=ENV_FILE)
+# Backward compatibility: many local setups keep variables in `backend/env`.
+if ALT_ENV_FILE.exists():
+    load_dotenv(dotenv_path=ALT_ENV_FILE, override=False)
 
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 NVIDIA_EMBED_API_KEY = os.getenv("NVIDIA_EMBED_API_KEY", NVIDIA_API_KEY)

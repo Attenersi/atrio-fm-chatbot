@@ -48,6 +48,14 @@ export type ChatHistoryItem = {
   content: string;
 };
 
+export type ChatStoredMessage = {
+  id: number;
+  thread_id: number;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+};
+
 export type TicketFilters = {
   category?: string;
   priority?: string;
@@ -218,6 +226,19 @@ export async function streamChat(
     throw new Error("Streaming finished without final payload");
   }
   return finalPayload;
+}
+
+export async function getChatHistory(limit = 200) {
+  return req(`/api/chat/history?limit=${Math.max(1, Math.min(2000, limit))}`) as Promise<{
+    thread: { id: number; user_id: number; is_active: boolean; title: string; created_at: string; updated_at: string };
+    messages: ChatStoredMessage[];
+  }>;
+}
+
+export async function startNewChat() {
+  return req("/api/chat/new", { method: "POST" }) as Promise<{
+    thread: { id: number; user_id: number; is_active: boolean; title: string; created_at: string; updated_at: string };
+  }>;
 }
 
 export async function getTickets(filters?: TicketFilters) {

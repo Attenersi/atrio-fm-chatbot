@@ -25,6 +25,7 @@ from .config import (
 )
 from .training_json_store import export_jsonl as export_jsonl_from_store
 from .training_json_store import build_dataset_view as build_dataset_view_from_store
+from .training_json_store import save_candidates as save_json_candidates
 from .training_json_store import upsert_candidate as upsert_json_candidate
 
 
@@ -213,6 +214,31 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS chat_threads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                title TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id INTEGER NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(thread_id) REFERENCES chat_threads(id)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS knowledge_gaps (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 question TEXT NOT NULL,
@@ -354,6 +380,18 @@ def init_db() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_training_examples_norm_input
             ON training_examples(normalized_input)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_threads_user_active
+            ON chat_threads(user_id, is_active, updated_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_created
+            ON chat_messages(thread_id, created_at ASC)
             """
         )
         _ensure_default_user(conn, ADMIN_USERNAME, ADMIN_PASSWORD or "admin", "admin")
@@ -970,6 +1008,129 @@ def delete_session(session_id: str) -> None:
         conn.commit()
 
 
+def _to_chat_message_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "thread_id": int(row["thread_id"]),
+        "role": str(row["role"]),
+        "content": str(row["content"]),
+        "created_at": str(row["created_at"]),
+    }
+
+
+def _to_chat_thread_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "user_id": int(row["user_id"]),
+        "is_active": bool(row["is_active"]),
+        "title": str(row["title"] or ""),
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def _ensure_active_chat_thread(conn: sqlite3.Connection, user_id: int) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT * FROM chat_threads
+        WHERE user_id = ? AND is_active = 1
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (int(user_id),),
+    ).fetchone()
+    if row:
+        return _to_chat_thread_row(row)
+    now = _utc_now_iso()
+    cur = conn.execute(
+        """
+        INSERT INTO chat_threads (user_id, is_active, title, created_at, updated_at)
+        VALUES (?, 1, '', ?, ?)
+        """,
+        (int(user_id), now, now),
+    )
+    thread_id = int(cur.lastrowid)
+    row = conn.execute("SELECT * FROM chat_threads WHERE id = ?", (thread_id,)).fetchone()
+    return _to_chat_thread_row(row) if row else {}
+
+
+def start_new_chat_thread(user_id: int) -> dict[str, Any]:
+    now = _utc_now_iso()
+    with get_conn() as conn:
+        conn.execute("UPDATE chat_threads SET is_active = 0 WHERE user_id = ?", (int(user_id),))
+        cur = conn.execute(
+            """
+            INSERT INTO chat_threads (user_id, is_active, title, created_at, updated_at)
+            VALUES (?, 1, '', ?, ?)
+            """,
+            (int(user_id), now, now),
+        )
+        thread_id = int(cur.lastrowid)
+        conn.commit()
+        row = conn.execute("SELECT * FROM chat_threads WHERE id = ?", (thread_id,)).fetchone()
+    return _to_chat_thread_row(row) if row else {}
+
+
+def get_active_chat_thread(user_id: int) -> dict[str, Any]:
+    with get_conn() as conn:
+        thread = _ensure_active_chat_thread(conn, int(user_id))
+        conn.commit()
+    return thread
+
+
+def list_chat_messages(thread_id: int, limit: int = 200) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM chat_messages
+            WHERE thread_id = ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (int(thread_id), max(1, int(limit))),
+        ).fetchall()
+    return [_to_chat_message_row(r) for r in rows]
+
+
+def list_active_chat_messages(user_id: int, limit: int = 200) -> dict[str, Any]:
+    with get_conn() as conn:
+        thread = _ensure_active_chat_thread(conn, int(user_id))
+        conn.commit()
+    messages = list_chat_messages(int(thread["id"]), limit=limit) if thread else []
+    return {"thread": thread, "messages": messages}
+
+
+def append_chat_exchange(user_id: int, user_message: str, assistant_message: str) -> dict[str, Any]:
+    user_text = str(user_message or "").strip()
+    assistant_text = str(assistant_message or "").strip()
+    if not user_text or not assistant_text:
+        return {}
+    now = _utc_now_iso()
+    with get_conn() as conn:
+        thread = _ensure_active_chat_thread(conn, int(user_id))
+        thread_id = int(thread["id"])
+        if not str(thread.get("title", "")).strip():
+            title = user_text[:80]
+            conn.execute("UPDATE chat_threads SET title = ? WHERE id = ?", (title, thread_id))
+        conn.execute(
+            """
+            INSERT INTO chat_messages (thread_id, role, content, created_at)
+            VALUES (?, 'user', ?, ?)
+            """,
+            (thread_id, user_text, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO chat_messages (thread_id, role, content, created_at)
+            VALUES (?, 'assistant', ?, ?)
+            """,
+            (thread_id, assistant_text, now),
+        )
+        conn.execute("UPDATE chat_threads SET updated_at = ? WHERE id = ?", (now, thread_id))
+        conn.commit()
+    return {"thread_id": thread_id}
+
+
 def _hydrate_training_example(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
     item["actual_output"] = _json_load(item.pop("actual_output_json", "{}"), {})
@@ -1213,6 +1374,7 @@ def upsert_review_seed_example(
     ticket_id: int | None = None,
     model: str = "",
     run_id: str = "",
+    force_append: bool = False,
 ) -> dict[str, Any]:
     if correction_type not in ALLOWED_CORRECTION_TYPES:
         correction_type = "pending"
@@ -1222,50 +1384,51 @@ def upsert_review_seed_example(
     created_at = _utc_now_iso()
     reviewed_at = _utc_now_iso() if correction_type in {"approved", "edited", "rejected"} else None
     with get_conn() as conn:
-        existing = conn.execute(
-            """
-            SELECT * FROM training_examples
-            WHERE source_type = ? AND source_id = ? AND source_ref = ?
-            """,
-            (source_type, source_id, source_ref),
-        ).fetchone()
-        if existing:
-            conn.execute(
+        if not force_append:
+            existing = conn.execute(
                 """
-                UPDATE training_examples
-                SET input_text = ?, normalized_input = ?, actual_output_json = ?, ideal_output_json = ?,
-                    correction_type = ?, human_notes = ?, context_used_json = ?, reasoning = ?,
-                    query_type = ?, in_scope = ?, grounded = ?, ticket_created = ?, ticket_id = ?,
-                    user_role = ?, model = ?, run_id = ?, reviewed_at = ?
-                WHERE id = ?
+                SELECT * FROM training_examples
+                WHERE source_type = ? AND source_id = ? AND source_ref = ?
                 """,
-                (
-                    input_text,
-                    normalized,
-                    _json_dump(actual_output),
-                    _json_dump(ideal_output),
-                    correction_type,
-                    human_notes,
-                    _json_dump(context_used or []),
-                    reasoning,
-                    query_type,
-                    in_scope,
-                    grounded,
-                    1 if ticket_created else 0,
-                    ticket_id,
-                    user_role,
-                    model,
-                    run_id,
-                    reviewed_at,
-                    int(existing["id"]),
-                ),
-            )
-            conn.commit()
-            row = conn.execute("SELECT * FROM training_examples WHERE id = ?", (int(existing["id"]),)).fetchone()
-            item = _hydrate_training_example(row) if row else {}
-            if item:
-                _sync_json_store_from_training_example(item)
-            return item
+                (source_type, source_id, source_ref),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE training_examples
+                    SET input_text = ?, normalized_input = ?, actual_output_json = ?, ideal_output_json = ?,
+                        correction_type = ?, human_notes = ?, context_used_json = ?, reasoning = ?,
+                        query_type = ?, in_scope = ?, grounded = ?, ticket_created = ?, ticket_id = ?,
+                        user_role = ?, model = ?, run_id = ?, reviewed_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        input_text,
+                        normalized,
+                        _json_dump(actual_output),
+                        _json_dump(ideal_output),
+                        correction_type,
+                        human_notes,
+                        _json_dump(context_used or []),
+                        reasoning,
+                        query_type,
+                        in_scope,
+                        grounded,
+                        1 if ticket_created else 0,
+                        ticket_id,
+                        user_role,
+                        model,
+                        run_id,
+                        reviewed_at,
+                        int(existing["id"]),
+                    ),
+                )
+                conn.commit()
+                row = conn.execute("SELECT * FROM training_examples WHERE id = ?", (int(existing["id"]),)).fetchone()
+                item = _hydrate_training_example(row) if row else {}
+                if item:
+                    _sync_json_store_from_training_example(item)
+                return item
 
         cur = conn.execute(
             """
@@ -1355,6 +1518,7 @@ def backfill_training_examples_from_tickets(limit: int = 5000) -> dict[str, Any]
             ticket_id=ticket_id,
             model="",
             run_id="v1-ticket-backfill",
+            force_append=True,
         )
         if item.get("source_id") == str(ticket_id):
             # We cannot directly know insert/update without extra query; infer from reviewed_at/history.
@@ -1423,6 +1587,7 @@ def backfill_training_examples_from_test_results(results_path: str) -> dict[str,
             ticket_id=actual.get("ticket_id"),
             model="",
             run_id="v1-test-backfill",
+            force_append=True,
         )
         processed += 1
         if is_pass:
@@ -1435,6 +1600,36 @@ def backfill_training_examples_from_test_results(results_path: str) -> dict[str,
 
 def build_v1_dataset_view() -> dict[str, Any]:
     return build_dataset_view_from_store()
+
+
+def rebuild_json_store_from_db() -> dict[str, Any]:
+    rows = get_training_examples(limit=500000, offset=0)
+    payload: list[dict[str, Any]] = []
+    for item in rows:
+        payload.append(
+            {
+                "id": item.get("id"),
+                "input": item.get("input_text", ""),
+                "actual_output": item.get("actual_output", {}),
+                "ideal_output": item.get("ideal_output") or item.get("actual_output", {}),
+                "human_notes": item.get("human_notes", ""),
+                "correction_type": item.get("correction_type", "pending"),
+                "context_used": item.get("context_used", []),
+                "reasoning": item.get("reasoning", ""),
+                "source_type": item.get("source_type", ""),
+                "source_id": item.get("source_id", ""),
+                "source_ref": item.get("source_ref", ""),
+                "user_role": item.get("user_role", ""),
+                "query_type": item.get("query_type", ""),
+                "ticket_id": item.get("ticket_id"),
+                "created_at": item.get("created_at", _utc_now_iso()),
+                "reviewed_at": item.get("reviewed_at"),
+                "knowledge_gap_logged": bool(item.get("knowledge_gap_logged", False)),
+                "knowledge_gap_reason": item.get("knowledge_gap_reason", ""),
+            }
+        )
+    save_json_candidates(payload)
+    return {"rows_written": len(payload)}
 
 
 def export_v1_jsonl(rows: list[dict[str, Any]]) -> str:

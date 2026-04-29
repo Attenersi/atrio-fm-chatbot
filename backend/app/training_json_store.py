@@ -5,6 +5,7 @@ import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+import shutil
 from typing import Any
 
 from .config import TRAINING_DATA_DIR
@@ -43,19 +44,21 @@ def _default_candidates_path() -> Path:
 
 
 def _record_key(item: dict[str, Any]) -> str:
-    source_type = str(item.get("source_type", "")).strip()
-    source_id = str(item.get("source_id", "")).strip()
-    source_ref = str(item.get("source_ref", "")).strip()
-    if source_type and source_id:
-        return f"{source_type}:{source_id}:{source_ref}"
     item_id_raw = item.get("id")
     try:
         item_id_int = int(item_id_raw)
     except Exception:
         item_id_int = 0
     if item_id_int > 0:
+        # Prefer stable DB id when available so each logged example can be kept
+        # as a separate record (append-like behavior across repeated test runs).
         item_id = str(item_id_int)
         return f"id:{item_id}"
+    source_type = str(item.get("source_type", "")).strip()
+    source_id = str(item.get("source_id", "")).strip()
+    source_ref = str(item.get("source_ref", "")).strip()
+    if source_type and source_id:
+        return f"{source_type}:{source_id}:{source_ref}"
     payload = f"{item.get('input', '')}|{source_type}|{source_id}|{source_ref}"
     digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
     return f"hash:{digest}"
@@ -364,3 +367,29 @@ def export_jsonl(rows: list[dict[str, Any]]) -> str:
             )
         )
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+def mass_mark_all_edited_if_any_custom_reasoning(path: str | Path | None = None) -> dict[str, Any]:
+    target = Path(path) if path else _default_candidates_path()
+    rows = load_candidates(target)
+    marker = "seeded from test suite result"
+    has_custom_reasoning = any(str(r.get("reasoning", "") or "").strip().lower() != marker for r in rows)
+    if not has_custom_reasoning:
+        return {"changed": 0, "total": len(rows), "applied": False, "backup_path": None}
+    backup_path = None
+    if target.exists():
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        backup = target.with_name(f"{target.stem}.backup_mass_edit_{ts}{target.suffix}")
+        shutil.copyfile(target, backup)
+        backup_path = str(backup)
+    changed = 0
+    updated: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        if _normalize_status(str(item.get("correction_type", ""))) != "edited":
+            item["correction_type"] = "edited"
+            item["reviewed_at"] = _utc_now_iso()
+            changed += 1
+        updated.append(_canonical_record(item))
+    save_candidates(updated, target)
+    return {"changed": changed, "total": len(rows), "applied": True, "backup_path": backup_path}

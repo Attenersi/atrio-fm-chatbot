@@ -1,10 +1,8 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { createManualTicket, streamChat, type ChatHistoryItem } from "../lib/api";
+import { createManualTicket, getChatHistory, startNewChat, streamChat, type ChatHistoryItem } from "../lib/api";
 import { MessageBubble } from "./MessageBubble";
-
-const STORAGE_KEY = "fm_chat_messages_v1";
 
 type ChatMessage = {
   role: "user" | "bot";
@@ -23,24 +21,25 @@ export function ChatWindow() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [creatingTicketIdx, setCreatingTicketIdx] = useState<number | null>(null);
 
   useEffect(() => {
-    try {
-      const raw = sessionStorage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as ChatMessage[];
-      if (Array.isArray(parsed)) {
-        setMessages(parsed);
+    void (async () => {
+      try {
+        const res = await getChatHistory(200);
+        const mapped: ChatMessage[] = (res.messages || []).map((m) => ({
+          role: m.role === "assistant" ? "bot" : "user",
+          text: m.content,
+        }));
+        setMessages(mapped);
+      } catch {
+        setMessages([]);
+      } finally {
+        setHistoryLoading(false);
       }
-    } catch {
-      // Ignore invalid session data.
-    }
+    })();
   }, []);
-
-  useEffect(() => {
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
-  }, [messages]);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -105,9 +104,16 @@ export function ChatWindow() {
   }
 
   function startNewChat() {
-    setMessages([]);
-    setInput("");
-    sessionStorage.removeItem(STORAGE_KEY);
+    if (loading) return;
+    void (async () => {
+      try {
+        await startNewChat();
+        setMessages([]);
+        setInput("");
+      } catch {
+        setMessages((prev) => [...prev, { role: "bot", text: "Could not start a new chat. Please try again." }]);
+      }
+    })();
   }
 
   async function createTicketAnyway(index: number) {
@@ -148,17 +154,11 @@ export function ChatWindow() {
     <section className="page-shell">
       <div className="toolbar" style={{ justifyContent: "space-between" }}>
         <h1 style={{ margin: 0 }}>FM Assistant Chat</h1>
-        <button
-          type="button"
-          onClick={startNewChat}
-          disabled={loading || messages.length === 0}
-          className="btn btn-ghost"
-        >
-          New chat
-        </button>
       </div>
       <div className="card" style={{ minHeight: 360, marginBottom: 12 }}>
-        {messages.length === 0 ? (
+        {historyLoading ? (
+          <p>Loading chat history...</p>
+        ) : messages.length === 0 ? (
           <p>Ask a facilities question or report a maintenance issue.</p>
         ) : (
           messages.map((m, i) => (
@@ -188,6 +188,14 @@ export function ChatWindow() {
           className="field"
           style={{ flex: 1 }}
         />
+        <button
+          type="button"
+          onClick={startNewChat}
+          disabled={loading}
+          className="btn btn-ghost"
+        >
+          New chat
+        </button>
         <button
           type="submit"
           disabled={loading}

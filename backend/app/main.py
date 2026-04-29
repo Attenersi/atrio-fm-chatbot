@@ -21,7 +21,9 @@ from .config import (
 from .doc_extract import UPLOAD_ALLOWED_EXTENSIONS, extract_text_from_upload
 from . import mail as mail_notify
 from .database import (
+    apply_classification_override,
     authenticate_user,
+    create_resolution_note,
     create_user_account,
     create_session,
     create_knowledge_gap,
@@ -31,8 +33,10 @@ from .database import (
     get_knowledge_gap,
     get_knowledge_gaps,
     get_session,
+    get_resolution_notes,
     get_ticket,
     get_tickets,
+    get_classification_overrides,
     get_training_example,
     get_training_examples,
     get_user_by_id,
@@ -60,7 +64,8 @@ app = FastAPI(title="FM Chatbot Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -143,6 +148,20 @@ class AdminTrainingExampleUpdateRequest(BaseModel):
 class AdminV1BuildRequest(BaseModel):
     test_results_path: str = "test_results_full.json"
     output_dir: str = "data"
+
+
+class ResolutionNoteCreateRequest(BaseModel):
+    note: str
+    added_by: str = ""
+    parts_used: str = ""
+    cost: float | None = None
+    time_spent_minutes: int | None = None
+
+
+class ClassificationOverrideCreateRequest(BaseModel):
+    field_changed: str  # category | priority | department
+    manager_value: str
+    changed_by: str = ""
 
 
 DOC_ALLOWED_EXTENSIONS = {".md", ".txt"}
@@ -932,6 +951,7 @@ def _finalize_chat_payload(
         and not _is_acknowledgement(req.message)
         and _is_building_info_candidate(req.message, conversation_text)
     )
+    gap_reason = ""
     if should_log_knowledge_gap:
         gap_reason = (
             "grounded=NO informational FM question; "
@@ -970,6 +990,8 @@ def _finalize_chat_payload(
             source_type=req.source_type.strip() or "chat_log",
             source_id=req.source_id.strip(),
             source_ref=req.source_ref.strip(),
+            knowledge_gap_logged=bool(should_log_knowledge_gap),
+            knowledge_gap_reason=gap_reason,
         )
     except Exception:
         # Training log must not break chat flow.
@@ -1227,6 +1249,72 @@ def api_ticket_by_id(ticket_id: int, user: dict = Depends(_require_auth)) -> dic
     if user.get("role") != "admin" and ticket.get("created_by_user_id") != user["id"]:
         raise HTTPException(status_code=403, detail="Access denied for this ticket")
     return {"ticket": ticket}
+
+
+@app.get("/api/admin/tickets/{ticket_id}/resolution-notes")
+def api_admin_ticket_resolution_notes(
+    ticket_id: int,
+    _: dict = Depends(_require_admin),
+) -> dict:
+    ticket = get_ticket(ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return {"notes": get_resolution_notes(ticket_id)}
+
+
+@app.post("/api/admin/tickets/{ticket_id}/resolution-notes")
+def api_admin_ticket_resolution_note_create(
+    ticket_id: int,
+    req: ResolutionNoteCreateRequest,
+    admin: dict = Depends(_require_admin),
+) -> dict:
+    ticket = get_ticket(ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    try:
+        note = create_resolution_note(
+            ticket_id=ticket_id,
+            note=req.note,
+            added_by=req.added_by.strip() or str(admin.get("username", "")),
+            parts_used=req.parts_used,
+            cost=req.cost,
+            time_spent_minutes=req.time_spent_minutes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"note": note}
+
+
+@app.get("/api/admin/tickets/{ticket_id}/classification-overrides")
+def api_admin_ticket_classification_overrides(
+    ticket_id: int,
+    _: dict = Depends(_require_admin),
+) -> dict:
+    ticket = get_ticket(ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return {"overrides": get_classification_overrides(ticket_id)}
+
+
+@app.post("/api/admin/tickets/{ticket_id}/classification-overrides")
+def api_admin_ticket_classification_override_create(
+    ticket_id: int,
+    req: ClassificationOverrideCreateRequest,
+    admin: dict = Depends(_require_admin),
+) -> dict:
+    ticket = get_ticket(ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    try:
+        result = apply_classification_override(
+            ticket_id=ticket_id,
+            field_changed=req.field_changed,
+            manager_value=req.manager_value,
+            changed_by=req.changed_by.strip() or str(admin.get("username", "")),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result
 
 
 @app.get("/api/admin/users")

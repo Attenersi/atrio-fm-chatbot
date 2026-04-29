@@ -14,8 +14,8 @@ export default function LoginPage() {
   }, [router]);
 
   return (
-    <section className="page-shell">
-      <p>Redirecting...</p>
+    <section className="page-shell auth-inline-center">
+      <p className="text-muted">Redirecting...</p>
     </section>
   );
 }

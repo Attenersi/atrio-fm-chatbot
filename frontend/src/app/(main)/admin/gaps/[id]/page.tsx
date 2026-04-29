@@ -215,19 +215,19 @@ export default function ResolveGapPage() {
           Use custom doc name (create new document)
         </label>
         {mode === "overwrite" && docs.length > 0 ? (
-          <p style={{ margin: 0, color: "#475467" }}>
+          <p className="text-muted" style={{ margin: 0 }}>
             Update mode: select existing doc above, then edit its current text in editor below.
           </p>
         ) : null}
         {!customDocAllowed ? (
-          <p style={{ margin: 0, color: "#475467" }}>
+          <p className="text-muted" style={{ margin: 0 }}>
             Custom doc name is available in append mode. Switch to append to create a new file.
           </p>
         ) : null}
 
         <label htmlFor="resolve-content">Content to save</label>
         {mode === "overwrite" ? (
-          <p style={{ margin: 0, color: "#475467" }}>
+          <p className="text-muted" style={{ margin: 0 }}>
             Current content is auto-loaded for editing.
           </p>
         ) : null}
@@ -260,7 +260,7 @@ export default function ResolveGapPage() {
           <button
             onClick={() => router.push("/admin")}
             disabled={busy}
-            style={{ background: "#fff", color: "#101828", border: "1px solid #d0d5dd" }}
+            className="btn btn-ghost"
           >
             Back
           </button>

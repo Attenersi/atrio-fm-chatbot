@@ -71,6 +71,19 @@ npm run dev
 
 Open `http://localhost:3000`.
 
+### One-command dev start (backend + frontend)
+
+From repo root:
+
+```powershell
+npm install
+npm run dev
+```
+
+This starts:
+- backend on `http://localhost:8000`
+- frontend on `http://localhost:3000`
+
 ## Testing quality
 
 RAG test runner lives in `backend/test_rag.py`.

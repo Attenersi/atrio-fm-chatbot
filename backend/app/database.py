@@ -29,6 +29,7 @@ ALLOWED_STATUS = {"Open", "In Progress", "Resolved"}
 ALLOWED_GAP_STATUS = {"new", "reviewed", "resolved"}
 ALLOWED_CORRECTION_TYPES = {"pending", "approved", "edited", "rejected"}
 ALLOWED_SOURCE_TYPES = {"chat_log", "ticket", "test_case"}
+ALLOWED_OVERRIDE_FIELDS = {"category", "priority", "department"}
 _AUTO_REFRESH_LOCK = False
 _LAST_AUTO_REFRESH_TS = 0.0
 STATUS_ALIASES = {
@@ -220,8 +221,39 @@ def init_db() -> None:
                 source_type TEXT NOT NULL DEFAULT 'chat_log',
                 source_id TEXT NOT NULL DEFAULT '',
                 source_ref TEXT NOT NULL DEFAULT '',
+                knowledge_gap_logged INTEGER NOT NULL DEFAULT 0,
+                knowledge_gap_reason TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 reviewed_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS resolution_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                note TEXT NOT NULL,
+                added_by TEXT NOT NULL DEFAULT '',
+                parts_used TEXT NOT NULL DEFAULT '',
+                cost REAL,
+                time_spent_minutes INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(ticket_id) REFERENCES tickets(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS classification_overrides (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                field_changed TEXT NOT NULL,
+                ai_value TEXT NOT NULL,
+                manager_value TEXT NOT NULL,
+                changed_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(ticket_id) REFERENCES tickets(id)
             )
             """
         )
@@ -271,6 +303,14 @@ def init_db() -> None:
         if "source_ref" not in tr_cols:
             conn.execute(
                 "ALTER TABLE training_examples ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''"
+            )
+        if "knowledge_gap_logged" not in tr_cols:
+            conn.execute(
+                "ALTER TABLE training_examples ADD COLUMN knowledge_gap_logged INTEGER NOT NULL DEFAULT 0"
+            )
+        if "knowledge_gap_reason" not in tr_cols:
+            conn.execute(
+                "ALTER TABLE training_examples ADD COLUMN knowledge_gap_reason TEXT NOT NULL DEFAULT ''"
             )
         conn.execute(
             """
@@ -388,6 +428,203 @@ def update_ticket_status(ticket_id: int, status: str) -> dict[str, Any]:
         )
         conn.commit()
     return get_ticket(ticket_id)
+
+
+def update_ticket_classification(
+    ticket_id: int,
+    *,
+    category: str | None = None,
+    priority: str | None = None,
+    department: str | None = None,
+) -> dict[str, Any]:
+    existing = get_ticket(ticket_id)
+    if not existing:
+        return {}
+    next_category = (category or existing.get("category") or "General").strip() or "General"
+    next_priority = (priority or existing.get("priority") or "NORMAL").strip() or "NORMAL"
+    next_department = (department or existing.get("department") or "Facility Management").strip() or "Facility Management"
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE tickets
+            SET category = ?, priority = ?, department = ?
+            WHERE id = ?
+            """,
+            (next_category, next_priority, next_department, ticket_id),
+        )
+        conn.commit()
+    return get_ticket(ticket_id)
+
+
+def create_resolution_note(
+    *,
+    ticket_id: int,
+    note: str,
+    added_by: str = "",
+    parts_used: str = "",
+    cost: float | None = None,
+    time_spent_minutes: int | None = None,
+) -> dict[str, Any]:
+    if not note.strip():
+        raise ValueError("Resolution note is required")
+    created_at = _utc_now_iso()
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO resolution_notes (ticket_id, note, added_by, parts_used, cost, time_spent_minutes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ticket_id,
+                note.strip(),
+                added_by.strip(),
+                parts_used.strip(),
+                cost,
+                time_spent_minutes,
+                created_at,
+            ),
+        )
+        note_id = int(cur.lastrowid)
+        conn.commit()
+        row = conn.execute("SELECT * FROM resolution_notes WHERE id = ?", (note_id,)).fetchone()
+    return dict(row) if row else {}
+
+
+def get_resolution_notes(ticket_id: int) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM resolution_notes WHERE ticket_id = ? ORDER BY id DESC",
+            (ticket_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_classification_overrides(ticket_id: int) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM classification_overrides WHERE ticket_id = ? ORDER BY id DESC",
+            (ticket_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def create_classification_override(
+    *,
+    ticket_id: int,
+    field_changed: str,
+    manager_value: str,
+    changed_by: str = "",
+) -> dict[str, Any]:
+    field = field_changed.strip().lower()
+    if field not in ALLOWED_OVERRIDE_FIELDS:
+        raise ValueError("Invalid field_changed. Allowed: category, priority, department")
+    ticket = get_ticket(ticket_id)
+    if not ticket:
+        raise ValueError("Ticket not found")
+    ai_value = str(ticket.get(field, "") or "")
+    manager_clean = manager_value.strip()
+    if not manager_clean:
+        raise ValueError("manager_value is required")
+    created_at = _utc_now_iso()
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO classification_overrides (ticket_id, field_changed, ai_value, manager_value, changed_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (ticket_id, field, ai_value, manager_clean, changed_by.strip(), created_at),
+        )
+        override_id = int(cur.lastrowid)
+        conn.commit()
+        row = conn.execute("SELECT * FROM classification_overrides WHERE id = ?", (override_id,)).fetchone()
+    return dict(row) if row else {}
+
+
+def _sync_training_examples_from_override(
+    *,
+    ticket_id: int,
+    changed_by: str,
+    field_changed: str,
+    manager_value: str,
+) -> int:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM training_examples WHERE ticket_id = ? ORDER BY id DESC",
+            (ticket_id,),
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            item = _hydrate_training_example(row)
+            ideal = dict(item.get("ideal_output") or item.get("actual_output") or {})
+            actual = dict(item.get("actual_output") or {})
+            if field_changed == "category":
+                ideal["category"] = manager_value
+            elif field_changed == "priority":
+                ideal["priority"] = manager_value
+            elif field_changed == "department":
+                ideal["department"] = manager_value
+            if "create_ticket" not in ideal:
+                ideal["create_ticket"] = bool(actual.get("create_ticket", True))
+            if "response" not in ideal:
+                ideal["response"] = actual.get("response", "")
+            if "issue_summary" not in ideal:
+                ideal["issue_summary"] = actual.get("issue_summary", "")
+            existing_notes = str(item.get("human_notes", "") or "").strip()
+            note_suffix = (
+                f"Override by {changed_by or 'manager'}: "
+                f"{field_changed} => {manager_value}."
+            )
+            human_notes = f"{existing_notes} {note_suffix}".strip()
+            conn.execute(
+                """
+                UPDATE training_examples
+                SET correction_type = 'edited',
+                    ideal_output_json = ?,
+                    human_notes = ?,
+                    reviewed_at = ?
+                WHERE id = ?
+                """,
+                (_json_dump(ideal), human_notes, _utc_now_iso(), int(row["id"])),
+            )
+            updated += 1
+        conn.commit()
+    return updated
+
+
+def apply_classification_override(
+    *,
+    ticket_id: int,
+    field_changed: str,
+    manager_value: str,
+    changed_by: str = "",
+) -> dict[str, Any]:
+    field = field_changed.strip().lower()
+    override = create_classification_override(
+        ticket_id=ticket_id,
+        field_changed=field,
+        manager_value=manager_value,
+        changed_by=changed_by,
+    )
+    ticket_kwargs: dict[str, str] = {}
+    if field == "category":
+        ticket_kwargs["category"] = manager_value
+    elif field == "priority":
+        ticket_kwargs["priority"] = manager_value
+    else:
+        ticket_kwargs["department"] = manager_value
+    ticket = update_ticket_classification(ticket_id, **ticket_kwargs)
+    training_examples_updated = _sync_training_examples_from_override(
+        ticket_id=ticket_id,
+        changed_by=changed_by,
+        field_changed=field,
+        manager_value=manager_value,
+    )
+    _auto_refresh_v1_dataset_files()
+    return {
+        "ticket": ticket,
+        "override": override,
+        "training_examples_updated": training_examples_updated,
+    }
 
 
 def ticket_stats(created_by_user_id: int | None = None) -> dict[str, Any]:
@@ -700,6 +937,7 @@ def _hydrate_training_example(row: sqlite3.Row) -> dict[str, Any]:
     item["context_used"] = _json_load(item.pop("context_used_json", "[]"), [])
     item["used_sources"] = _json_load(item.pop("used_sources_json", "[]"), [])
     item["ticket_created"] = bool(item.get("ticket_created"))
+    item["knowledge_gap_logged"] = bool(item.get("knowledge_gap_logged"))
     return item
 
 
@@ -722,6 +960,8 @@ def create_training_example(
     source_type: str = "chat_log",
     source_id: str = "",
     source_ref: str = "",
+    knowledge_gap_logged: bool = False,
+    knowledge_gap_reason: str = "",
 ) -> dict[str, Any]:
     if source_type not in ALLOWED_SOURCE_TYPES:
         source_type = "chat_log"
@@ -734,15 +974,20 @@ def create_training_example(
                 input_text, normalized_input, actual_output_json, ideal_output_json, human_notes,
                 correction_type, context_used_json, reasoning, used_sources_json,
                 context_count, query_type, in_scope, grounded, ticket_created,
-                ticket_id, user_id, user_role, model, run_id, source_type, source_id, source_ref, created_at, reviewed_at
+                ticket_id, user_id, user_role, model, run_id, source_type, source_id, source_ref,
+                knowledge_gap_logged, knowledge_gap_reason, created_at, reviewed_at
             )
-            VALUES (?, ?, ?, '', '', 'pending', ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 input_text,
                 normalized,
                 _json_dump(actual_output),
+                "",
+                "",
+                "pending",
                 _json_dump(context_used or []),
+                "",
                 _json_dump(used_sources or []),
                 int(context_count),
                 query_type,
@@ -757,7 +1002,10 @@ def create_training_example(
                 source_type,
                 source_id,
                 source_ref,
+                1 if knowledge_gap_logged else 0,
+                knowledge_gap_reason.strip(),
                 created_at,
+                None,
             ),
         )
         example_id = int(cur.lastrowid)

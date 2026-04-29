@@ -63,7 +63,7 @@ export function TicketTable({
               style={{ cursor: onSelectTicket ? "pointer" : "default" }}
             >
               <td>{t.id}</td>
-              <td style={{ color: "#475467" }}>"{t.message}"</td>
+              <td className="text-muted">"{t.message}"</td>
               <td>{t.issue_summary || "-"}</td>
               {showCreatedBy ? (
                 <td>{t.created_by_username ?? (t.created_by_user_id != null ? `#${t.created_by_user_id}` : "—")}</td>

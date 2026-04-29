@@ -14,8 +14,8 @@ export default function AdminLoginPage() {
   }, [router]);
 
   return (
-    <section className="page-shell">
-      <p>Redirecting to login...</p>
+    <section className="page-shell auth-inline-center">
+      <p className="text-muted">Redirecting to login...</p>
     </section>
   );
 }

@@ -105,8 +105,31 @@ export type TrainingExample = {
   user_role: string;
   model: string;
   run_id: string;
+  knowledge_gap_logged: boolean;
+  knowledge_gap_reason: string;
   created_at: string;
   reviewed_at: string | null;
+};
+
+export type ResolutionNote = {
+  id: number;
+  ticket_id: number;
+  note: string;
+  added_by: string;
+  parts_used: string;
+  cost: number | null;
+  time_spent_minutes: number | null;
+  created_at: string;
+};
+
+export type ClassificationOverride = {
+  id: number;
+  ticket_id: number;
+  field_changed: "category" | "priority" | "department";
+  ai_value: string;
+  manager_value: string;
+  changed_by: string;
+  created_at: string;
 };
 
 async function req(path: string, init?: RequestInit) {
@@ -204,6 +227,10 @@ export async function getTickets(filters?: TicketFilters) {
   if (filters?.status) params.set("status", filters.status);
   const qs = params.toString();
   return req(`/api/tickets${qs ? `?${qs}` : ""}`);
+}
+
+export async function getTicketById(ticketId: number) {
+  return req(`/api/tickets/${ticketId}`) as Promise<{ ticket: Ticket }>;
 }
 
 export async function getStats() {
@@ -408,4 +435,50 @@ export async function adminExportTrainingExamples(correctionTypes = "approved,ed
     throw new Error(`Request failed: ${res.status}`);
   }
   return res.text();
+}
+
+export async function adminListResolutionNotes(ticketId: number) {
+  return req(`/api/admin/tickets/${ticketId}/resolution-notes`) as Promise<{
+    notes: ResolutionNote[];
+  }>;
+}
+
+export async function adminCreateResolutionNote(
+  ticketId: number,
+  payload: {
+    note: string;
+    added_by?: string;
+    parts_used?: string;
+    cost?: number | null;
+    time_spent_minutes?: number | null;
+  }
+) {
+  return req(`/api/admin/tickets/${ticketId}/resolution-notes`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }) as Promise<{ note: ResolutionNote }>;
+}
+
+export async function adminListClassificationOverrides(ticketId: number) {
+  return req(`/api/admin/tickets/${ticketId}/classification-overrides`) as Promise<{
+    overrides: ClassificationOverride[];
+  }>;
+}
+
+export async function adminCreateClassificationOverride(
+  ticketId: number,
+  payload: {
+    field_changed: "category" | "priority" | "department";
+    manager_value: string;
+    changed_by?: string;
+  }
+) {
+  return req(`/api/admin/tickets/${ticketId}/classification-overrides`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }) as Promise<{
+    ticket: Ticket;
+    override: ClassificationOverride;
+    training_examples_updated: number;
+  }>;
 }

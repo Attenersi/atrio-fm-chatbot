@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -41,16 +40,17 @@ export default function RegisterPage() {
   }
 
   if (checking) {
-    return <section className="page-shell"><p>Loading...</p></section>;
+    return (
+      <section className="page-shell auth-inline-center">
+        <p className="text-muted">Loading...</p>
+      </section>
+    );
   }
 
   return (
     <section className="page-shell auth-center-shell">
       <div className="auth-header-strip" aria-hidden />
       <div className="card auth-card panel-grid">
-        <div className="brand-lockup" style={{ justifyContent: "center" }}>
-          <Image src="/atrio-brand-assets/atrio-logo-dark.png?v=4" alt="Atrio" width={170} height={50} priority />
-        </div>
         <h1 style={{ textAlign: "center", marginBottom: 0 }}>Create account</h1>
         <form onSubmit={onSubmit} className="panel-grid">
           <label htmlFor="reg-username">Username</label>

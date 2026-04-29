@@ -3,10 +3,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  adminCreateClassificationOverride,
+  getTicketById,
   getSession,
+  adminCreateResolutionNote,
+  adminListClassificationOverrides,
   adminCreateDoc,
   adminDeleteDoc,
   adminGetDoc,
+  adminListResolutionNotes,
   adminListKnowledgeGaps,
   adminListDocs,
   adminListUsers,
@@ -17,7 +22,10 @@ import {
   adminUpdateDoc,
   type AdminDoc,
   type AdminUserRow,
+  type ClassificationOverride,
   type KnowledgeGap,
+  type ResolutionNote,
+  type Ticket,
 } from "../../../lib/api";
 
 const DOC_NAME_REGEX = /^[a-zA-Z0-9._-]+\.(md|txt)$/i;
@@ -38,6 +46,21 @@ function formatGapReason(notes: string): { title: string; detail?: string } {
 }
 
 type UserEdit = { email: string; role: "admin" | "user"; active: boolean };
+type AdminTab = "tickets" | "knowledge" | "users" | "documents";
+
+function priorityBadgeStyle(priority: string): React.CSSProperties {
+  const p = (priority || "").toUpperCase();
+  if (p === "URGENT") {
+    return { border: "1px solid var(--chip-danger-border)", background: "var(--chip-danger-bg)", color: "var(--chip-danger-text)" };
+  }
+  if (p === "HIGH") {
+    return { border: "1px solid var(--chip-warn-border)", background: "var(--chip-warn-bg)", color: "var(--chip-warn-text)" };
+  }
+  if (p === "LOW") {
+    return { border: "1px solid var(--chip-success-border)", background: "var(--chip-success-bg)", color: "var(--chip-success-text)" };
+  }
+  return { border: "1px solid var(--chip-info-border)", background: "var(--chip-info-bg)", color: "var(--chip-info-text)" };
+}
 
 export default function AdminPage() {
   const router = useRouter();
@@ -59,6 +82,17 @@ export default function AdminPage() {
   const [users, setUsers] = useState<AdminUserRow[]>([]);
   const [userEdits, setUserEdits] = useState<Record<number, UserEdit>>({});
   const [userBusyId, setUserBusyId] = useState<number | null>(null);
+  const [opsTicketId, setOpsTicketId] = useState("");
+  const [resolutionNote, setResolutionNote] = useState("");
+  const [resolutionParts, setResolutionParts] = useState("");
+  const [resolutionCost, setResolutionCost] = useState("");
+  const [resolutionMinutes, setResolutionMinutes] = useState("");
+  const [overrideField, setOverrideField] = useState<"category" | "priority" | "department">("category");
+  const [overrideValue, setOverrideValue] = useState("");
+  const [opsNotes, setOpsNotes] = useState<ResolutionNote[]>([]);
+  const [opsOverrides, setOpsOverrides] = useState<ClassificationOverride[]>([]);
+  const [opsTicketPreview, setOpsTicketPreview] = useState<Ticket | null>(null);
+  const [activeTab, setActiveTab] = useState<AdminTab>("tickets");
 
   const hasSelection = useMemo(() => Boolean(selectedName), [selectedName]);
   const hasSession = useMemo(() => Boolean(adminUsername), [adminUsername]);
@@ -105,8 +139,18 @@ export default function AdminPage() {
 
   useEffect(() => {
     if (!hasSession) return;
-    loadGaps({ quiet: true });
-  }, [hasSession, gapFilter]);
+    if (activeTab === "documents") {
+      loadDocs({ quiet: true });
+      return;
+    }
+    if (activeTab === "knowledge") {
+      loadGaps({ quiet: true });
+      return;
+    }
+    if (activeTab === "users") {
+      loadUsers({ quiet: true });
+    }
+  }, [hasSession, activeTab, gapFilter]);
 
   async function loadDocs({ quiet }: { quiet?: boolean } = {}) {
     if (!hasSession) {
@@ -304,6 +348,93 @@ export default function AdminPage() {
     router.replace("/");
   }
 
+  async function loadOpsHistory() {
+    const ticketId = Number(opsTicketId);
+    if (!hasSession || !Number.isInteger(ticketId) || ticketId <= 0) {
+      setStatus("Provide a valid numeric ticket ID.");
+      return;
+    }
+    setBusy(true);
+    setStatus(`Loading ops history for ticket #${ticketId}...`);
+    try {
+      const [ticketRes, notesRes, overridesRes] = await Promise.all([
+        getTicketById(ticketId),
+        adminListResolutionNotes(ticketId),
+        adminListClassificationOverrides(ticketId),
+      ]);
+      setOpsTicketPreview(ticketRes.ticket);
+      setOpsNotes(notesRes.notes);
+      setOpsOverrides(overridesRes.overrides);
+      setStatus(`Loaded ticket #${ticketId} ops history.`);
+    } catch (err) {
+      setStatus(`Ops history load failed: ${(err as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitResolutionNote() {
+    const ticketId = Number(opsTicketId);
+    if (!hasSession || !Number.isInteger(ticketId) || ticketId <= 0) {
+      setStatus("Provide a valid numeric ticket ID.");
+      return;
+    }
+    if (!resolutionNote.trim()) {
+      setStatus("Resolution note is required.");
+      return;
+    }
+    setBusy(true);
+    setStatus(`Saving resolution note for ticket #${ticketId}...`);
+    try {
+      await adminCreateResolutionNote(ticketId, {
+        note: resolutionNote.trim(),
+        parts_used: resolutionParts.trim(),
+        cost: resolutionCost.trim() ? Number(resolutionCost) : null,
+        time_spent_minutes: resolutionMinutes.trim() ? Number(resolutionMinutes) : null,
+      });
+      setResolutionNote("");
+      setResolutionParts("");
+      setResolutionCost("");
+      setResolutionMinutes("");
+      await loadOpsHistory();
+      setStatus(`Resolution note saved for ticket #${ticketId}.`);
+    } catch (err) {
+      setStatus(`Resolution note save failed: ${(err as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitClassificationOverride() {
+    const ticketId = Number(opsTicketId);
+    if (!hasSession || !Number.isInteger(ticketId) || ticketId <= 0) {
+      setStatus("Provide a valid numeric ticket ID.");
+      return;
+    }
+    if (!overrideValue.trim()) {
+      setStatus("Override value is required.");
+      return;
+    }
+    setBusy(true);
+    setStatus(`Saving override for ticket #${ticketId}...`);
+    try {
+      const res = await adminCreateClassificationOverride(ticketId, {
+        field_changed: overrideField,
+        manager_value: overrideValue.trim(),
+      });
+      setOpsTicketPreview(res.ticket);
+      setOverrideValue("");
+      await loadOpsHistory();
+      setStatus(
+        `Override saved for ticket #${ticketId}. Training examples updated: ${res.training_examples_updated}.`
+      );
+    } catch (err) {
+      setStatus(`Override save failed: ${(err as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!ready) {
     return (
       <section>
@@ -319,112 +450,245 @@ export default function AdminPage() {
       <div className="card panel-grid">
         <p style={{ margin: 0 }}>You are logged in as <strong>{adminUsername}</strong>.</p>
         <div className="toolbar">
-          <button onClick={() => loadDocs()} disabled={busy || !hasSession}>
-            Load docs
+          <button onClick={() => setActiveTab("tickets")} className={activeTab === "tickets" ? "btn" : "btn btn-ghost"}>
+            Tickets Ops
           </button>
-          <button onClick={runReindex} disabled={busy || !hasSession}>
-            Reindex
+          <button onClick={() => setActiveTab("knowledge")} className={activeTab === "knowledge" ? "btn" : "btn btn-ghost"}>
+            Knowledge Gaps
           </button>
-          <button
-            onClick={logout}
-            disabled={busy}
-            className="btn btn-ghost"
-          >
-            Logout
+          <button onClick={() => setActiveTab("users")} className={activeTab === "users" ? "btn" : "btn btn-ghost"}>
+            Users
+          </button>
+          <button onClick={() => setActiveTab("documents")} className={activeTab === "documents" ? "btn" : "btn btn-ghost"}>
+            Documents
           </button>
         </div>
       </div>
 
-      <div className="split-layout">
-        <div className="card">
-          <h3>Documents</h3>
-          <div className="admin-doc-list">
-            {docs.map((d) => (
-              <button
-                key={d.name}
-                type="button"
-                onClick={() => openDoc(d.name)}
-                disabled={busy || !hasSession}
-                className={`admin-doc-list__item${d.name === selectedName ? " admin-doc-list__item--active" : ""}`}
-              >
-                {d.name}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="card panel-grid">
-          <h3>Editor {selectedName ? `- ${selectedName}` : ""}</h3>
-          <textarea
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
-            rows={16}
-            style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #d0d5dd" }}
-            placeholder="Select a document to edit..."
-          />
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={saveDoc} disabled={busy || !hasSelection}>
-              Save
-            </button>
-            <button onClick={deleteDoc} disabled={busy || !hasSelection || !hasSession}>
-              Delete
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div className="card panel-grid">
-        <h3>Create New Document</h3>
-        <input
-          value={newName}
-          onChange={(e) => setNewName(e.target.value)}
-          placeholder="e.g. elevator_maintenance.md"
-          className="field"
-        />
-        <textarea
-          value={newContent}
-          onChange={(e) => setNewContent(e.target.value)}
-          rows={8}
-          placeholder="New document content..."
-          className="field"
-        />
-        <button onClick={createDoc} disabled={busy || !hasSession}>
-          Create document
-        </button>
-      </div>
-
-      <div className="card panel-grid">
-        <h3>Upload Document</h3>
-        <p style={{ margin: 0, color: "#475467" }}>
-          Supported: .txt, .md, .csv, .pdf, .docx
+      {activeTab === "tickets" && <div className="card panel-grid">
+        <h3>Ticket Learning Loop (v1.5)</h3>
+        <p style={{ margin: 0, color: "var(--muted)" }}>
+          Add resolution notes and classification overrides per ticket. Overrides are synced to training examples.
         </p>
-        <input
-          type="file"
-          onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
-          accept=".txt,.md,.csv,.pdf,.docx"
-        />
-        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div className="toolbar">
           <input
-            type="checkbox"
-            checked={uploadOverwrite}
-            onChange={(e) => setUploadOverwrite(e.target.checked)}
+            className="field"
+            style={{ width: 160 }}
+            value={opsTicketId}
+            onChange={(e) => setOpsTicketId(e.target.value)}
+            placeholder="Ticket ID (e.g. 42)"
           />
-          Overwrite if converted target already exists
-        </label>
-        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <input
-            type="checkbox"
-            checked={uploadAutoReindex}
-            onChange={(e) => setUploadAutoReindex(e.target.checked)}
-          />
-          Auto reindex right after upload
-        </label>
-        <button onClick={uploadDoc} disabled={busy || !hasSession || !uploadFile}>
-          Upload file
-        </button>
-      </div>
+          <button onClick={loadOpsHistory} disabled={busy || !hasSession}>
+            Load ticket history
+          </button>
+        </div>
+        {opsTicketPreview ? (
+          <div
+            style={{
+              border: "1px solid var(--border)",
+              borderRadius: 10,
+              padding: 12,
+              background: "var(--surface)",
+              display: "grid",
+              gap: 10,
+            }}
+          >
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <span
+                style={{
+                  fontSize: 12,
+                  padding: "2px 8px",
+                  borderRadius: 999,
+                  border: "1px solid var(--border)",
+                  background: "var(--surface-2)",
+                }}
+              >
+                Ticket #{opsTicketPreview.id}
+              </span>
+              <span
+                style={{
+                  fontSize: 12,
+                  padding: "2px 8px",
+                  borderRadius: 999,
+                  border: "1px solid var(--border)",
+                  background: "var(--surface-2)",
+                }}
+              >
+                Status: {opsTicketPreview.status}
+              </span>
+              <span
+                style={{
+                  fontSize: 12,
+                  padding: "2px 8px",
+                  borderRadius: 999,
+                  ...priorityBadgeStyle(opsTicketPreview.priority),
+                }}
+              >
+                Priority: {opsTicketPreview.priority}
+              </span>
+              <span
+                style={{
+                  fontSize: 12,
+                  padding: "2px 8px",
+                  borderRadius: 999,
+                  border: "1px solid var(--border)",
+                  background: "var(--surface-2)",
+                }}
+              >
+                Category: {opsTicketPreview.category}
+              </span>
+            </div>
 
-      <div className="card panel-grid">
+            <div style={{ display: "grid", gap: 8 }}>
+              <div>
+                <div style={{ fontSize: 12, color: "var(--muted)" }}>Issue summary</div>
+                <div style={{ fontSize: 14 }}>{opsTicketPreview.issue_summary || "—"}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: "var(--muted)" }}>User message</div>
+                <div
+                  style={{
+                    fontSize: 14,
+                    background: "var(--surface-inset)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 8,
+                    padding: 8,
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  {opsTicketPreview.message || "—"}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: "var(--muted)" }}>Assistant response</div>
+                <div
+                  style={{
+                    fontSize: 14,
+                    background: "var(--surface-inset)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 8,
+                    padding: 8,
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  {opsTicketPreview.response || "—"}
+                </div>
+              </div>
+              <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                Department: {opsTicketPreview.department || "—"}
+              </div>
+            </div>
+          </div>
+        ) : null}
+        <div className="split-layout">
+          <div className="card panel-grid">
+            <h4 style={{ margin: 0 }}>Resolution Note</h4>
+            <textarea
+              className="field"
+              rows={4}
+              value={resolutionNote}
+              onChange={(e) => setResolutionNote(e.target.value)}
+              placeholder="What was done to resolve the issue?"
+            />
+            <input
+              className="field"
+              value={resolutionParts}
+              onChange={(e) => setResolutionParts(e.target.value)}
+              placeholder="Parts used (optional)"
+            />
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                className="field"
+                value={resolutionCost}
+                onChange={(e) => setResolutionCost(e.target.value)}
+                placeholder="Cost (optional)"
+              />
+              <input
+                className="field"
+                value={resolutionMinutes}
+                onChange={(e) => setResolutionMinutes(e.target.value)}
+                placeholder="Time spent min (optional)"
+              />
+            </div>
+            <button onClick={submitResolutionNote} disabled={busy || !hasSession}>
+              Save resolution note
+            </button>
+          </div>
+          <div className="card panel-grid">
+            <h4 style={{ margin: 0 }}>Classification Override</h4>
+            <div style={{ display: "flex", gap: 8 }}>
+              <select
+                className="field"
+                value={overrideField}
+                onChange={(e) =>
+                  setOverrideField(e.target.value as "category" | "priority" | "department")
+                }
+              >
+                <option value="category">category</option>
+                <option value="priority">priority</option>
+                <option value="department">department</option>
+              </select>
+              <input
+                className="field"
+                value={overrideValue}
+                onChange={(e) => setOverrideValue(e.target.value)}
+                placeholder="New manager value"
+              />
+            </div>
+            <button onClick={submitClassificationOverride} disabled={busy || !hasSession}>
+              Save override
+            </button>
+          </div>
+        </div>
+        <div className="split-layout">
+          <div className="card panel-grid">
+            <h4 style={{ margin: 0 }}>Resolution Notes History</h4>
+            <div style={{ maxHeight: 220, overflowY: "auto" }}>
+              {opsNotes.length === 0 ? (
+                <p style={{ margin: 0, color: "var(--muted)" }}>No notes loaded.</p>
+              ) : (
+                opsNotes.map((n) => (
+                  <div key={n.id} style={{ borderBottom: "1px solid var(--border)", padding: "8px 0" }}>
+                    <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                      #{n.id} by {n.added_by || "admin"} at {new Date(n.created_at).toLocaleString()}
+                    </div>
+                    <div>{n.note}</div>
+                    {(n.parts_used || n.time_spent_minutes || n.cost !== null) && (
+                      <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                        {n.parts_used ? `parts: ${n.parts_used}` : ""}
+                        {n.time_spent_minutes ? ` | minutes: ${n.time_spent_minutes}` : ""}
+                        {n.cost !== null ? ` | cost: ${n.cost}` : ""}
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+          <div className="card panel-grid">
+            <h4 style={{ margin: 0 }}>Classification Override History</h4>
+            <div style={{ maxHeight: 220, overflowY: "auto" }}>
+              {opsOverrides.length === 0 ? (
+                <p style={{ margin: 0, color: "var(--muted)" }}>No overrides loaded.</p>
+              ) : (
+                opsOverrides.map((o) => (
+                  <div key={o.id} style={{ borderBottom: "1px solid var(--border)", padding: "8px 0" }}>
+                    <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                      #{o.id} by {o.changed_by || "admin"} at {new Date(o.created_at).toLocaleString()}
+                    </div>
+                    <div>
+                      {o.field_changed}: <strong>{o.ai_value || "—"}</strong> →{" "}
+                      <strong>{o.manager_value}</strong>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      </div>}
+
+      {activeTab === "users" && <div className="card panel-grid">
         <h3>Users</h3>
         <p style={{ margin: 0, color: "var(--muted)" }}>
           Set roles, active flag, and optional email (for ticket status notifications). At least one active admin is required.
@@ -526,9 +790,9 @@ export default function AdminPage() {
             </tbody>
           </table>
         </div>
-      </div>
+      </div>}
 
-      <div className="card panel-grid">
+      {activeTab === "knowledge" && <div className="card panel-grid">
         <h3>Knowledge Gaps</h3>
         <div className="toolbar">
           <select
@@ -596,7 +860,7 @@ export default function AdminPage() {
               ))}
               {gaps.length === 0 ? (
                 <tr>
-                  <td colSpan={8} style={{ color: "#475467" }}>
+                  <td colSpan={8} className="text-muted">
                     No knowledge gaps found for current filter.
                   </td>
                 </tr>
@@ -604,7 +868,109 @@ export default function AdminPage() {
             </tbody>
           </table>
         </div>
-      </div>
+      </div>}
+
+      {activeTab === "documents" && <>
+        <div className="card panel-grid">
+          <div className="toolbar">
+            <button onClick={() => loadDocs()} disabled={busy || !hasSession}>
+              Refresh docs
+            </button>
+            <button onClick={runReindex} disabled={busy || !hasSession}>
+              Reindex
+            </button>
+          </div>
+        </div>
+        <div className="split-layout">
+          <div className="card">
+            <h3>Documents</h3>
+            <div className="admin-doc-list">
+              {docs.map((d) => (
+                <button
+                  key={d.name}
+                  type="button"
+                  onClick={() => openDoc(d.name)}
+                  disabled={busy || !hasSession}
+                  className={`admin-doc-list__item${d.name === selectedName ? " admin-doc-list__item--active" : ""}`}
+                >
+                  {d.name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="card panel-grid">
+            <h3>Editor {selectedName ? `- ${selectedName}` : ""}</h3>
+            <textarea
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
+              rows={16}
+            style={{ width: "100%" }}
+            className="field"
+              placeholder="Select a document to edit..."
+            />
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={saveDoc} disabled={busy || !hasSelection}>
+                Save
+              </button>
+              <button onClick={deleteDoc} disabled={busy || !hasSelection || !hasSession}>
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="card panel-grid">
+          <h3>Create New Document</h3>
+          <input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            placeholder="e.g. elevator_maintenance.md"
+            className="field"
+          />
+          <textarea
+            value={newContent}
+            onChange={(e) => setNewContent(e.target.value)}
+            rows={8}
+            placeholder="New document content..."
+            className="field"
+          />
+          <button onClick={createDoc} disabled={busy || !hasSession}>
+            Create document
+          </button>
+        </div>
+
+        <div className="card panel-grid">
+          <h3>Upload Document</h3>
+          <p className="text-muted" style={{ margin: 0 }}>
+            Supported: .txt, .md, .csv, .pdf, .docx
+          </p>
+          <input
+            type="file"
+            onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+            accept=".txt,.md,.csv,.pdf,.docx"
+          />
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={uploadOverwrite}
+              onChange={(e) => setUploadOverwrite(e.target.checked)}
+            />
+            Overwrite if converted target already exists
+          </label>
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={uploadAutoReindex}
+              onChange={(e) => setUploadAutoReindex(e.target.checked)}
+            />
+            Auto reindex right after upload
+          </label>
+          <button onClick={uploadDoc} disabled={busy || !hasSession || !uploadFile}>
+            Upload file
+          </button>
+        </div>
+      </>}
 
       <p style={{ marginTop: 12 }}>{status}</p>
     </section>

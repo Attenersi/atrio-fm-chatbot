@@ -34,7 +34,11 @@ export function MessageBubble({
     >
       <div
         className="card"
-        style={{ background: isUser ? "#d1e9ff" : "#ffffff", padding: 12 }}
+        style={{
+          background: isUser ? "var(--color-chat-user-bg)" : "var(--color-chat-bot-bg)",
+          color: isUser ? "var(--color-chat-user-fg)" : "var(--color-chat-bot-fg)",
+          padding: 12,
+        }}
       >
         <div>{text}</div>
         {!isUser && (
@@ -45,13 +49,13 @@ export function MessageBubble({
               {queryType ? <TicketBadge label={queryType.replaceAll("_", " ")} /> : null}
             </div>
             {ticketId ? (
-              <p style={{ margin: "8px 0 0", fontSize: 13, color: "#175cd3", fontWeight: 700 }}>
+              <p style={{ margin: "8px 0 0", fontSize: 13, color: "var(--chip-info-text)", fontWeight: 700 }}>
                 Ticket created: #{ticketId}
               </p>
             ) : null}
             {ticketCreated === false ? (
               <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
-                <p style={{ margin: 0, fontSize: 12, color: "#475467" }}>
+                <p style={{ margin: 0, fontSize: 12, color: "var(--muted)" }}>
                   Informational query - no ticket created automatically.
                 </p>
                 {onCreateTicketAnyway ? (
@@ -68,7 +72,7 @@ export function MessageBubble({
               </div>
             ) : null}
             {sources && sources.length > 0 ? (
-              <p style={{ margin: "8px 0 0", fontSize: 12, color: "#475467" }}>
+              <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--muted)" }}>
                 Sources: {sources.join(", ")}
               </p>
             ) : null}

@@ -21,22 +21,6 @@ const STATUSES = ["pending", "approved", "edited", "rejected"] as const;
 const CATEGORIES = ["General", "Safety", "Plumbing", "HVAC", "Electrical"] as const;
 const PRIORITIES = ["LOW", "NORMAL", "HIGH", "URGENT"] as const;
 
-function debugLog(runId: string, hypothesisId: string, location: string, message: string, data: Record<string, unknown>) {
-  fetch("http://127.0.0.1:7639/ingest/37967754-e61e-424e-bf6f-12bf8171f39f", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "4ff89d" },
-    body: JSON.stringify({
-      sessionId: "4ff89d",
-      runId,
-      hypothesisId,
-      location,
-      message,
-      data,
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {});
-}
-
 export default function AdminTrainingReviewPage() {
   const router = useRouter();
   const [ready, setReady] = useState(false);
@@ -67,44 +51,6 @@ export default function AdminTrainingReviewPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
 
-  async function loadRows() {
-    setLoading(true);
-    setStatus("Loading training examples...");
-    try {
-      const res = await adminListTrainingExamples({
-        correction_type: statusFilter === "all" ? undefined : statusFilter,
-        limit: 1000,
-        offset: 0,
-      });
-      // #region agent log
-      debugLog(
-        "pre-fix",
-        "H1",
-        "training/page.tsx:loadRows",
-        "API response summary",
-        {
-          statusFilter,
-          total: res.examples.length,
-          firstFiveStatuses: res.examples.slice(0, 5).map((x) => x.correction_type),
-        }
-      );
-      // #endregion
-      setRows(res.examples);
-      try {
-        const m = await adminGetTrainingV1Manifest();
-        setManifest(m?.manifest ?? null);
-      } catch {
-        setManifest(null);
-      }
-      setCurrentIndex(0);
-      setStatus(`Loaded ${res.examples.length} examples.`);
-    } catch (err) {
-      setStatus(`Load failed: ${(err as Error).message}`);
-    } finally {
-      setLoading(false);
-    }
-  }
-
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const idTrimmed = idQuery.trim();
@@ -121,6 +67,36 @@ export default function AdminTrainingReviewPage() {
       );
     });
   }, [rows, search, idQuery, statusFilter]);
+
+  useEffect(() => {
+    setCurrentIndex((i) => Math.min(i, Math.max(0, filtered.length - 1)));
+  }, [filtered.length]);
+
+  async function loadRows() {
+    setLoading(true);
+    setStatus("Loading training examples...");
+    try {
+      // Filtering by status happens locally via `filtered` so the user can
+      // switch tabs without a network round trip; pull all rows once.
+      const res = await adminListTrainingExamples({
+        limit: 1000,
+        offset: 0,
+      });
+      setRows(res.examples);
+      try {
+        const m = await adminGetTrainingV1Manifest();
+        setManifest(m?.manifest ?? null);
+      } catch {
+        setManifest(null);
+      }
+      setCurrentIndex(0);
+      setStatus(`Loaded ${res.examples.length} examples.`);
+    } catch (err) {
+      setStatus(`Load failed: ${(err as Error).message}`);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   const currentEntry = filtered[currentIndex] ?? null;
 
@@ -250,40 +226,6 @@ export default function AdminTrainingReviewPage() {
     }
     return base;
   }, [rows]);
-
-  useEffect(() => {
-    const statusCounts: Record<string, number> = {};
-    for (const row of rows) {
-      const raw = String(row.correction_type || "");
-      statusCounts[raw] = (statusCounts[raw] ?? 0) + 1;
-    }
-    // #region agent log
-    debugLog(
-      "pre-fix",
-      "H2",
-      "training/page.tsx:rowsEffect",
-      "Rows state distribution",
-      {
-        rowsLength: rows.length,
-        statusCounts,
-      }
-    );
-    // #endregion
-  }, [rows]);
-
-  useEffect(() => {
-    // #region agent log
-    debugLog(
-      "pre-fix",
-      "H3",
-      "training/page.tsx:statsEffect",
-      "Computed stats shown in header",
-      {
-        stats,
-      }
-    );
-    // #endregion
-  }, [stats]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -551,15 +493,6 @@ function Field({ label, value, italic }: { label: string; value: string; italic?
     <div style={{ marginTop: 10 }}>
       <div style={s.miniLabel}>{label}</div>
       <div style={{ ...s.fieldBox, fontStyle: italic ? "italic" : "normal" }}>{value}</div>
-    </div>
-  );
-}
-
-function EditInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
-  return (
-    <div>
-      <label style={s.editLabel}>{label}</label>
-      <input value={value} onChange={(e) => onChange(e.target.value)} style={s.input} />
     </div>
   );
 }

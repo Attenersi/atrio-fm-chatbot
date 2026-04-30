@@ -16,7 +16,6 @@ SECRET_PATTERNS = [
 ]
 BLOCKED_PATH_PATTERNS = [
     "backend/.env",
-    "backend/tickets.db",
     "backend/chroma_db/",
     "backend/tests/results/",
     "backend/data/fine_tuning_v1_candidates.jsonl",

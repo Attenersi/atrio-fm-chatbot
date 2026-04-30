@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 import threading
 import time
@@ -10,15 +12,28 @@ from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Query, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from starlette.requests import Request
 
 from .classifier import fallback_response, parse_llm_json
 from .config import (
+    ANALYZER_CACHE_TTL_HOURS,
+    AUTH_COOKIE_SAMESITE,
+    AUTH_COOKIE_SECURE,
     AUTH_SESSION_COOKIE,
     AUTH_SESSION_TTL_HOURS,
+    CORS_ALLOW_ORIGIN_REGEX,
     DOCS_DIR,
+    EVAL_BASELINE_MAX_AGE_HOURS,
     LLM_MODEL,
+    MAX_ACTIVE_OVERRIDES,
     NVIDIA_API_KEY,
+    OVERRIDE_MIN_CONFIDENCE,
     RAG_TOP_K,
+    RATE_LIMIT_CHAT,
+    RATE_LIMIT_EMBED,
     TRAINING_DATA_AUTO_REFRESH,
     TRAINING_DATA_AUTO_REFRESH_SECONDS,
     TRAINING_DATA_DIR,
@@ -48,6 +63,24 @@ from .database import (
     init_db,
     list_active_chat_messages,
     list_users,
+    cleanup_training_examples_and_candidates,
+    compute_pending_cache_key,
+    count_active_prompt_overrides,
+    create_eval_run,
+    finalize_eval_run,
+    get_eval_run,
+    get_prompt_analysis_cache,
+    get_prompt_override,
+    has_running_eval_run,
+    latest_done_eval_run,
+    list_eval_runs,
+    list_pending_grouped,
+    list_prompt_overrides,
+    apply_prompt_override as db_apply_prompt_override,
+    rollback_prompt_override as db_rollback_prompt_override,
+    set_prompt_override_eval_after,
+    prune_training_examples_for_review_policy,
+    put_prompt_analysis_cache,
     append_chat_exchange,
     start_new_chat_thread,
     ticket_stats,
@@ -65,8 +98,9 @@ from .database import (
     write_v1_dataset_files,
 )
 from .ingest import run_ingest
-from .llm import chat, embed
-from .rag import generate, generate_stream, retrieve_with_sources
+from .eval_runner import EvalSummary, load_golden, run_eval
+from .llm import chat_with_health_timeout, embed
+from .rag import agenerate, agenerate_stream, retrieve_with_sources
 from .training_json_store import (
     bootstrap_from_examples,
     get_candidate_for_api,
@@ -76,13 +110,34 @@ from .training_json_store import (
 )
 
 
+_obs_log = logging.getLogger("fm.observability")
+
+
+def _rate_limit_key(request: Request) -> str:
+    """Per-user limit when authenticated, per-IP otherwise. Avoids penalising
+    everyone behind a shared NAT once a single user is signed in."""
+    session_id = request.cookies.get(AUTH_SESSION_COOKIE)
+    if session_id:
+        try:
+            session = get_session(session_id)
+            if session and session.get("user_id"):
+                return f"user:{int(session['user_id'])}"
+        except Exception:
+            _obs_log.exception("rate limit key lookup failed; falling back to IP")
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_rate_limit_key)
+
 app = FastAPI(title="FM Chatbot Backend")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 _DATASET_REFRESH_THREAD_STARTED = False
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origin_regex=CORS_ALLOW_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -91,6 +146,9 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
+    # Server reads chat history from the DB via _history_from_active_chat;
+    # this field is kept for backward compatibility (tests, old clients) and
+    # is only consulted when the DB has no active thread for this user yet.
     history: list[dict[str, str]] = Field(default_factory=list)
     run_id: str = ""
     source_type: str = ""
@@ -366,7 +424,7 @@ def _start_training_dataset_scheduler() -> None:
             try:
                 write_v1_dataset_files(TRAINING_DATA_DIR)
             except Exception:
-                pass
+                _obs_log.exception("write_v1_dataset_files failed in background runner")
             time.sleep(interval)
 
     th = threading.Thread(target=_runner, name="training-dataset-refresh", daemon=True)
@@ -405,6 +463,9 @@ def _history_from_active_chat(user: dict, fallback: list[dict[str, str]]) -> lis
     try:
         payload = list_active_chat_messages(user_id, limit=60)
     except Exception:
+        _obs_log.exception(
+            "list_active_chat_messages failed; using frontend history fallback"
+        )
         return list(fallback)
     rows = payload.get("messages", [])
     if not rows:
@@ -861,12 +922,26 @@ def _has_operational_signal(message: str) -> bool:
 def _is_acknowledgement(message: str) -> bool:
     words = _tokens(message)
     if not words:
-        return True
+        # Empty token set (e.g. emojis, "!!!", "🚨") is not an acknowledgement.
+        return False
     if words.issubset(ACK_HINTS):
         return True
     # Short "confirmation only" messages should never create knowledge gaps.
     normalized = " ".join(message.strip().split())
     return len(normalized) <= 28 and bool(words & ACK_HINTS)
+
+
+def _apply_fm_safety_net(payload: dict, message: str) -> dict:
+    """If LLM says out-of-scope but the message looks FM-related, mark in-scope but ungrounded
+    so the answer goes to knowledge gaps."""
+    if payload.get("in_scope") == "NO" and _looks_like_fm_query(message):
+        payload["in_scope"] = "YES"
+        payload["grounded"] = "NO"
+        payload["response"] = (
+            "I can help only with Facility Management topics. "
+            "This FM question is not covered well enough in the current documentation yet."
+        )
+    return payload
 
 
 def _is_building_info_candidate(message: str, history_text: str) -> bool:
@@ -900,6 +975,13 @@ def _extract_partial_response_text(raw: str) -> str:
                 out.append("\r")
             elif ch in {'"', "\\", "/"}:
                 out.append(ch)
+            elif ch == "u" and i + 4 < len(raw):
+                hex_digits = raw[i + 1 : i + 5]
+                try:
+                    out.append(chr(int(hex_digits, 16)))
+                    i += 4
+                except ValueError:
+                    out.append(ch)
             else:
                 # Keep unknown escape content best-effort.
                 out.append(ch)
@@ -950,12 +1032,9 @@ def _finalize_chat_payload(
     elif decision_source == "YES":
         should_create_ticket = True
     elif decision_source == "NO":
-        heuristic_input = f"{conversation_text}\nUser: {req.message}".strip()
-        should_create_ticket = _should_auto_create_ticket(
-            heuristic_input,
-            query_type,
-            payload.get("in_scope", "YES"),
-        ) and query_type in AUTO_TICKET_QUERY_TYPES
+        # Trust the LLM's NO unless a strong override fires below (water_on_electronics,
+        # escalation_signal, hidden_issue). Eliminates expected=NO actual=YES drift.
+        should_create_ticket = False
     else:
         heuristic_input = f"{conversation_text}\nUser: {req.message}".strip()
         should_create_ticket = _should_auto_create_ticket(
@@ -965,7 +1044,7 @@ def _finalize_chat_payload(
         should_create_ticket = True
         if query_type == "INFORMATIONAL":
             query_type = "INCIDENT"
-    elif info_lookup or followup_status:
+    elif (info_lookup or followup_status) and not should_create_ticket:
         query_type = "INFORMATIONAL"
 
     if water_on_electronics and payload.get("in_scope") == "YES":
@@ -979,6 +1058,10 @@ def _finalize_chat_payload(
         payload["priority"] = _bump_priority_one_level(str(payload.get("priority", "NORMAL")))
         if query_type == "INFORMATIONAL":
             query_type = "INCIDENT"
+
+    if should_create_ticket and query_type not in AUTO_TICKET_QUERY_TYPES:
+        # Keep query_type aligned with the actual ticket decision.
+        query_type = "INCIDENT"
     issue_summary = _fallback_issue_summary(payload.get("issue_summary", ""))
     if issue_summary == "No issue summary provided.":
         issue_summary = _fallback_issue_summary(req.message)
@@ -987,17 +1070,17 @@ def _finalize_chat_payload(
         ticket = create_ticket(
             message=req.message,
             issue_summary=issue_summary,
-            category=payload["category"],
-            priority=payload["priority"],
-            department=payload["department"],
-            response=payload["response"],
-            created_by_user_id=user.get("id"),
+            category=payload.get("category") or "General",
+            priority=payload.get("priority") or "NORMAL",
+            department=payload.get("department") or "Facility Management",
+            response=payload.get("response") or "",
+            created_by_user_id=int(user.get("id") or 0),
         )
         ticket_id = ticket["id"]
         try:
             mail_notify.notify_ticket_created(ticket, user.get("username"))
         except Exception:
-            pass
+            _obs_log.exception("mail notify_ticket_created failed (chat finalize)")
     payload["context_count"] = len(context)
     payload["used_sources"] = sources
     payload["query_type"] = query_type
@@ -1035,6 +1118,11 @@ def _finalize_chat_payload(
         "issue_summary": issue_summary,
     }
     try:
+        retrieval_meta = {
+            "num_chunks": len(sources),
+            "any_chunk": bool(sources),
+            "context_count": len(context),
+        }
         create_training_example(
             input_text=req.message,
             actual_output=actual_output,
@@ -1055,10 +1143,11 @@ def _finalize_chat_payload(
             source_ref=req.source_ref.strip(),
             knowledge_gap_logged=bool(should_log_knowledge_gap),
             knowledge_gap_reason=gap_reason,
+            retrieval_meta=retrieval_meta,
         )
     except Exception:
-        # Training log must not break chat flow.
-        pass
+        # Training log must not break chat flow, but it must leave a trail.
+        _obs_log.exception("create_training_example failed in chat finalize")
     try:
         append_chat_exchange(
             int(user.get("id") or 0),
@@ -1066,8 +1155,7 @@ def _finalize_chat_payload(
             str(payload.get("response", "") or ""),
         )
     except Exception:
-        # Chat history persistence must not break chat flow.
-        pass
+        _obs_log.exception("append_chat_exchange failed in chat finalize")
     return payload
 
 
@@ -1077,57 +1165,87 @@ def on_startup() -> None:
     try:
         bootstrap_from_examples(get_training_examples(limit=200000, offset=0))
     except Exception:
-        pass
+        _obs_log.exception("bootstrap_from_examples failed at startup")
     _start_training_dataset_scheduler()
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
+def _run_llm_probe() -> dict[str, str]:
+    """Single source of truth for the optional LLM sanity check used by /health and /health/llm.
+    Uses LLM_HEALTH_TIMEOUT_SECONDS so monitors don't hang for the full chat timeout."""
     if not NVIDIA_API_KEY:
         return {"status": "warning", "message": "Missing NVIDIA_API_KEY"}
     try:
-        reply = chat([{"role": "user", "content": "Reply with: ok"}], temperature=0)
+        reply = chat_with_health_timeout(
+            [{"role": "user", "content": "Reply with: ok"}],
+            temperature=0,
+        )
         return {"status": "ok", "provider": "nvidia_nim", "probe": reply.strip()}
     except Exception as exc:  # pragma: no cover
         return {"status": "error", "message": str(exc)}
 
 
+@app.get("/health")
+def health(probe: int = Query(default=0, ge=0, le=1)) -> dict[str, str]:
+    # Default: cheap liveness check (no external calls), so monitors don't hang
+    # if the LLM provider is slow or offline. Pass `?probe=1` for full sanity.
+    if probe != 1:
+        if not NVIDIA_API_KEY:
+            return {"status": "warning", "message": "Missing NVIDIA_API_KEY"}
+        return {"status": "ok", "provider": "nvidia_nim"}
+    return _run_llm_probe()
+
+
+@app.get("/health/llm")
+def health_llm() -> dict[str, str]:
+    return _run_llm_probe()
+
+
 @app.post("/api/chat")
-def api_chat(req: ChatRequest, user: dict = Depends(_require_auth)) -> dict:
+@limiter.limit(RATE_LIMIT_CHAT)
+async def api_chat(
+    request: Request, req: ChatRequest, user: dict = Depends(_require_auth)
+) -> dict:
     try:
-        req.history = _history_from_active_chat(user, req.history)
-        context, sources = retrieve_with_sources(req.message, k=RAG_TOP_K)
-        raw_response = generate(req.message, context, req.history)
+        # All sync I/O (SQLite, Chroma) runs in a worker thread so the event
+        # loop stays responsive while we wait on the LLM HTTP call.
+        req.history = await asyncio.to_thread(
+            _history_from_active_chat, user, req.history
+        )
+        context, sources = await asyncio.to_thread(
+            retrieve_with_sources, req.message, RAG_TOP_K
+        )
+        raw_response = await agenerate(req.message, context, req.history)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     try:
         payload = parse_llm_json(raw_response)
     except Exception:
         payload = fallback_response(raw_response)
-    # Safety net: if the LLM marks an obviously FM query as out-of-scope,
-    # treat it as in-scope but not grounded so it lands in knowledge gaps.
-    if payload.get("in_scope") == "NO" and _looks_like_fm_query(req.message):
-        payload["in_scope"] = "YES"
-        payload["grounded"] = "NO"
-        payload["response"] = (
-            "I can help only with Facility Management topics. "
-            "This FM question is not covered well enough in the current documentation yet."
-        )
-    return _finalize_chat_payload(req, payload, context, sources, user)
+    payload = _apply_fm_safety_net(payload, req.message)
+    return await asyncio.to_thread(
+        _finalize_chat_payload, req, payload, context, sources, user
+    )
 
 
 @app.post("/api/chat/stream")
-def api_chat_stream(req: ChatRequest, user: dict = Depends(_require_auth)) -> StreamingResponse:
+@limiter.limit(RATE_LIMIT_CHAT)
+async def api_chat_stream(
+    request: Request, req: ChatRequest, user: dict = Depends(_require_auth)
+) -> StreamingResponse:
     def event(data: dict) -> str:
         return f"data: {json.dumps(data)}\n\n"
 
-    def generate_events():
+    async def generate_events():
         try:
-            req.history = _history_from_active_chat(user, req.history)
-            context, sources = retrieve_with_sources(req.message, k=RAG_TOP_K)
+            req.history = await asyncio.to_thread(
+                _history_from_active_chat, user, req.history
+            )
+            context, sources = await asyncio.to_thread(
+                retrieve_with_sources, req.message, RAG_TOP_K
+            )
             raw = ""
             streamed_len = 0
-            for chunk in generate_stream(req.message, context, req.history):
+            async for chunk in agenerate_stream(req.message, context, req.history):
                 raw += chunk
                 partial_response = _extract_partial_response_text(raw)
                 if len(partial_response) > streamed_len:
@@ -1139,14 +1257,10 @@ def api_chat_stream(req: ChatRequest, user: dict = Depends(_require_auth)) -> St
                 payload = parse_llm_json(raw)
             except Exception:
                 payload = fallback_response(raw)
-            if payload.get("in_scope") == "NO" and _looks_like_fm_query(req.message):
-                payload["in_scope"] = "YES"
-                payload["grounded"] = "NO"
-                payload["response"] = (
-                    "I can help only with Facility Management topics. "
-                    "This FM question is not covered well enough in the current documentation yet."
-                )
-            final_payload = _finalize_chat_payload(req, payload, context, sources, user)
+            payload = _apply_fm_safety_net(payload, req.message)
+            final_payload = await asyncio.to_thread(
+                _finalize_chat_payload, req, payload, context, sources, user
+            )
             final_response = final_payload.get("response", "")
             if isinstance(final_response, str) and len(final_response) > streamed_len:
                 yield event(
@@ -1154,7 +1268,14 @@ def api_chat_stream(req: ChatRequest, user: dict = Depends(_require_auth)) -> St
                 )
             yield event({"type": "final", "payload": final_payload})
         except Exception as exc:
-            yield event({"type": "error", "message": str(exc)})
+            # Keep any partial chunks already streamed and just append a marker.
+            yield event(
+                {
+                    "type": "chunk",
+                    "delta": "\n\n[stream interrupted; see server logs for details]",
+                }
+            )
+            yield event({"type": "error", "message": str(exc), "partial": True})
 
     return StreamingResponse(generate_events(), media_type="text/event-stream")
 
@@ -1180,7 +1301,8 @@ def api_chat_new(user: dict = Depends(_require_auth)) -> dict:
 
 
 @app.post("/api/embed")
-def api_embed(req: EmbedRequest) -> dict:
+@limiter.limit(RATE_LIMIT_EMBED)
+def api_embed(request: Request, req: EmbedRequest) -> dict:
     try:
         vectors = embed(req.texts, input_type=req.input_type)
     except Exception as exc:
@@ -1207,8 +1329,8 @@ def api_auth_login(req: AuthLoginRequest, response: Response) -> dict:
         key=AUTH_SESSION_COOKIE,
         value=session["id"],
         httponly=True,
-        samesite="lax",
-        secure=False,
+        samesite=AUTH_COOKIE_SAMESITE,
+        secure=AUTH_COOKIE_SECURE,
         max_age=_auth_cookie_max_age_seconds(),
     )
     return {
@@ -1299,7 +1421,7 @@ def api_tickets_manual(req: ManualTicketCreateRequest, user: dict = Depends(_req
     try:
         mail_notify.notify_ticket_created(ticket, user.get("username"))
     except Exception:
-        pass
+        _obs_log.exception("mail notify_ticket_created failed (manual ticket)")
     return {"ticket": ticket}
 
 
@@ -1336,7 +1458,7 @@ def api_ticket_update(
             existing, ticket, old_status, creator_email
         )
     except Exception:
-        pass
+        _obs_log.exception("mail notify_ticket_status_changed failed")
     return {"ticket": ticket}
 
 
@@ -1564,8 +1686,8 @@ def api_admin_login(req: AuthLoginRequest, response: Response) -> dict:
         key=AUTH_SESSION_COOKIE,
         value=session["id"],
         httponly=True,
-        samesite="lax",
-        secure=False,
+        samesite=AUTH_COOKIE_SAMESITE,
+        secure=AUTH_COOKIE_SECURE,
         max_age=_auth_cookie_max_age_seconds(),
     )
     return {"authenticated": True, "username": user["username"], "role": user["role"]}
@@ -1677,6 +1799,288 @@ def api_admin_training_examples(
     return {"examples": rows}
 
 
+@app.get("/api/admin/training-quality/groups")
+def api_admin_training_quality_groups(
+    limit_per_group: int = Query(default=5, ge=1, le=50),
+    _: dict = Depends(_require_admin),
+) -> dict:
+    """Faza B: aggregate pending training_examples by mismatch_fields. No LLM."""
+    return list_pending_grouped(limit_per_group=limit_per_group)
+
+
+_GOLDEN_PATH = Path(TRAINING_DATA_DIR) / "eval_golden.jsonl"
+
+
+async def _execute_eval_run(run_id: int) -> None:
+    """Background task: run all golden cases and finalize the eval_run row."""
+    try:
+        cases = await asyncio.to_thread(load_golden, _GOLDEN_PATH)
+        if not cases:
+            await asyncio.to_thread(
+                finalize_eval_run,
+                run_id,
+                status="error",
+                total=0,
+                passed=0,
+                accuracy_overall=None,
+                accuracy_category=None,
+                accuracy_priority=None,
+                accuracy_ticket_created=None,
+                accuracy_response_tokens=None,
+                details={"error": "Golden snapshot empty or missing"},
+            )
+            return
+        summary: EvalSummary = await run_eval(cases, max_concurrency=8)
+        await asyncio.to_thread(
+            finalize_eval_run,
+            run_id,
+            status="done",
+            total=summary.total,
+            passed=summary.passed,
+            accuracy_overall=summary.accuracy_overall,
+            accuracy_category=summary.accuracy_category,
+            accuracy_priority=summary.accuracy_priority,
+            accuracy_ticket_created=summary.accuracy_ticket_created,
+            accuracy_response_tokens=summary.accuracy_response_tokens,
+            details={
+                "elapsed_seconds": summary.elapsed_seconds,
+                "failures": [
+                    {"case_id": r.case_id, "failures": r.failures, "error": r.error}
+                    for r in summary.results
+                    if not r.passed
+                ],
+            },
+        )
+    except Exception as exc:
+        _obs_log.exception("eval_run %s crashed", run_id)
+        try:
+            finalize_eval_run(
+                run_id,
+                status="error",
+                total=0,
+                passed=0,
+                accuracy_overall=None,
+                accuracy_category=None,
+                accuracy_priority=None,
+                accuracy_ticket_created=None,
+                accuracy_response_tokens=None,
+                details={"error": str(exc)},
+            )
+        except Exception:
+            _obs_log.exception("finalize_eval_run after crash also failed (run %s)", run_id)
+
+
+@app.post("/api/admin/training-quality/eval/run")
+async def api_admin_training_quality_eval_run(
+    _: dict = Depends(_require_admin),
+) -> dict:
+    if has_running_eval_run():
+        raise HTTPException(status_code=409, detail="Eval run already in progress")
+    if not _GOLDEN_PATH.exists():
+        raise HTTPException(
+            status_code=412,
+            detail=f"Golden snapshot missing: {_GOLDEN_PATH}. Run scripts.build_golden_snapshot first.",
+        )
+    run_id = create_eval_run()
+    asyncio.create_task(_execute_eval_run(run_id))
+    return {"run_id": run_id, "status": "running"}
+
+
+@app.get("/api/admin/training-quality/eval/runs")
+def api_admin_training_quality_eval_runs(
+    limit: int = Query(default=20, ge=1, le=200),
+    _: dict = Depends(_require_admin),
+) -> dict:
+    return {"runs": list_eval_runs(limit=limit)}
+
+
+@app.get("/api/admin/training-quality/eval/runs/{run_id}")
+def api_admin_training_quality_eval_run_by_id(
+    run_id: int,
+    _: dict = Depends(_require_admin),
+) -> dict:
+    item = get_eval_run(run_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Eval run not found")
+    return {"run": item}
+
+
+class PromptOverrideApplyRequest(BaseModel):
+    error_type: str
+    suggested_change: str = ""
+    approved_change: str
+    affected_example_ids: list[int] = []
+    confidence: float = 1.0
+    manually_edited: bool = False
+
+
+@app.post("/api/admin/training-quality/overrides/apply")
+async def api_admin_overrides_apply(
+    req: PromptOverrideApplyRequest,
+    user: dict = Depends(_require_admin),
+) -> dict:
+    """Faza E: apply a (possibly manager-edited) prompt override.
+    Guards:
+      - 422 baseline_required if no fresh eval_runs (within EVAL_BASELINE_MAX_AGE_HOURS)
+      - 422 max_active_overrides if MAX_ACTIVE_OVERRIDES already active
+      - 422 low_confidence if analyzer confidence < OVERRIDE_MIN_CONFIDENCE
+        and the manager did not explicitly mark the change as manually_edited
+    """
+    approved = (req.approved_change or "").strip()
+    if not approved:
+        raise HTTPException(status_code=422, detail="approved_change is required")
+
+    if count_active_prompt_overrides() >= MAX_ACTIVE_OVERRIDES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"max_active_overrides reached ({MAX_ACTIVE_OVERRIDES}); rollback or "
+                "consolidate existing overrides before applying a new one"
+            ),
+        )
+
+    if req.confidence < OVERRIDE_MIN_CONFIDENCE and not req.manually_edited:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"low_confidence ({req.confidence:.2f}) below floor "
+                f"{OVERRIDE_MIN_CONFIDENCE}; edit the rule manually before applying"
+            ),
+        )
+
+    baseline = latest_done_eval_run(within_seconds=EVAL_BASELINE_MAX_AGE_HOURS * 3600)
+    if not baseline:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "baseline_required: no eval_run with status=done in the last "
+                f"{EVAL_BASELINE_MAX_AGE_HOURS}h. Run an eval first."
+            ),
+        )
+
+    record = db_apply_prompt_override(
+        error_type=req.error_type,
+        suggested_change=req.suggested_change,
+        approved_change=approved,
+        affected_example_ids=req.affected_example_ids,
+        created_by_user_id=user.get("id"),
+        eval_baseline_id=int(baseline.get("id") or 0) or None,
+    )
+
+    # Schedule eval_after in the background unless one is already running.
+    eval_after_run_id: int | None = None
+    if not has_running_eval_run():
+        try:
+            eval_after_run_id = create_eval_run(override_active_ids=[record["id"]])
+            asyncio.create_task(_execute_eval_run(eval_after_run_id))
+            set_prompt_override_eval_after(record["id"], eval_after_run_id)
+        except Exception:
+            _obs_log.exception("scheduling eval_after for override %s failed", record.get("id"))
+
+    return {
+        "override": record,
+        "baseline": {
+            "id": baseline.get("id"),
+            "accuracy_overall": baseline.get("accuracy_overall"),
+            "accuracy_category": baseline.get("accuracy_category"),
+            "accuracy_priority": baseline.get("accuracy_priority"),
+            "accuracy_ticket_created": baseline.get("accuracy_ticket_created"),
+            "accuracy_response_tokens": baseline.get("accuracy_response_tokens"),
+        },
+        "eval_after_run_id": eval_after_run_id,
+    }
+
+
+@app.post("/api/admin/training-quality/overrides/{override_id}/rollback")
+async def api_admin_overrides_rollback(
+    override_id: int,
+    _: dict = Depends(_require_admin),
+) -> dict:
+    record = db_rollback_prompt_override(override_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Override not active or not found")
+    return {"override": record}
+
+
+@app.get("/api/admin/training-quality/overrides")
+def api_admin_overrides_list(
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    _: dict = Depends(_require_admin),
+) -> dict:
+    items = list_prompt_overrides(status=status, limit=limit)
+    # Hydrate baseline / after accuracy for the UI delta widget.
+    enriched: list[dict] = []
+    for it in items:
+        baseline_id = it.get("eval_baseline_id")
+        after_id = it.get("eval_after_id")
+        baseline_acc = None
+        after_acc = None
+        if baseline_id:
+            b = get_eval_run(int(baseline_id))
+            if b:
+                baseline_acc = b.get("accuracy_overall")
+        if after_id:
+            a = get_eval_run(int(after_id))
+            if a:
+                after_acc = a.get("accuracy_overall")
+        it["baseline_accuracy"] = baseline_acc
+        it["after_accuracy"] = after_acc
+        enriched.append(it)
+    return {"overrides": enriched}
+
+
+@app.get("/api/admin/training-quality/analysis")
+@limiter.limit("1/5minute")
+async def api_admin_training_quality_analysis(
+    request: Request,
+    _: dict = Depends(_require_admin),
+) -> dict:
+    """Faza D: returns LLM-generated suggestions for current pending mismatches.
+    Cache hit (<TTL hours) returns instantly; miss spawns one LLM call through
+    the global RPM bucket. Per-user 1/5min limit prevents F5-spam burning the
+    NVIDIA budget on cold-misses."""
+    from .prompt_analyzer import analyze_pending_async  # local import: heavy module
+    from .rag import SYSTEM_PROMPT
+
+    cache_key = compute_pending_cache_key()
+    cached = get_prompt_analysis_cache(cache_key, ANALYZER_CACHE_TTL_HOURS)
+    if cached is not None:
+        return {
+            "cached": True,
+            "cache_key": cache_key,
+            "generated_at": cached["created_at"],
+            "model": cached["model"],
+            **cached["result"],
+        }
+    grouped = list_pending_grouped(limit_per_group=5)
+    groups = grouped.get("groups", [])
+    if not groups:
+        return {
+            "cached": False,
+            "cache_key": cache_key,
+            "groups": [],
+            "rag_suggestions": [],
+            "model": None,
+            "generated_at": grouped.get("generated_at"),
+        }
+    try:
+        result = await analyze_pending_async(groups, SYSTEM_PROMPT)
+    except Exception as exc:
+        _obs_log.exception("prompt analyzer failed")
+        raise HTTPException(status_code=502, detail=f"Analyzer failed: {exc}") from exc
+    payload = result.to_dict()
+    put_prompt_analysis_cache(cache_key, payload, result.model)
+    fresh = get_prompt_analysis_cache(cache_key, ANALYZER_CACHE_TTL_HOURS)
+    return {
+        "cached": False,
+        "cache_key": cache_key,
+        "generated_at": fresh["created_at"] if fresh else None,
+        "model": result.model,
+        **payload,
+    }
+
+
 @app.get("/api/admin/training-examples/{example_id}")
 def api_admin_training_example_by_id(
     example_id: int,
@@ -1714,7 +2118,7 @@ def api_admin_training_example_update(
                 reasoning=req.reasoning,
             )
         except Exception:
-            pass
+            _obs_log.exception("create_training_example failed (chat append fallback)")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not item:
@@ -1808,8 +2212,17 @@ def api_admin_training_examples_v1_build_files(
 
 @app.post("/api/admin/training-examples/v1/mark-all-edited")
 def api_admin_training_examples_mark_all_edited(
+    confirm: bool = Query(default=False),
     _: dict = Depends(_require_admin),
 ) -> dict:
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Destructive bulk action. Pass ?confirm=true to acknowledge that this will "
+                "rewrite correction_type for many rows."
+            ),
+        )
     result = mass_mark_all_edited_if_any_custom_reasoning()
     return {"ok": True, **result}
 
@@ -1840,6 +2253,22 @@ def api_admin_training_examples_rebuild_json_store(
     _: dict = Depends(_require_admin),
 ) -> dict:
     result = rebuild_json_store_from_db()
+    return {"ok": True, **result}
+
+
+@app.post("/api/admin/training-examples/v1/prune-to-review-policy")
+def api_admin_training_examples_prune_to_review_policy(
+    _: dict = Depends(_require_admin),
+) -> dict:
+    result = prune_training_examples_for_review_policy()
+    return {"ok": True, **result}
+
+
+@app.post("/api/admin/training-examples/v1/cleanup-now")
+def api_admin_training_examples_cleanup_now(
+    _: dict = Depends(_require_admin),
+) -> dict:
+    result = cleanup_training_examples_and_candidates()
     return {"ok": True, **result}
 
 

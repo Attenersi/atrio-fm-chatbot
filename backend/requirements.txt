@@ -3,6 +3,7 @@ uvicorn
 python-dotenv
 python-multipart
 openai
+slowapi
 langchain
 langchain-community
 langchain-text-splitters

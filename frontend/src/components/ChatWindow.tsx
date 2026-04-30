@@ -1,7 +1,12 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { createManualTicket, getChatHistory, startNewChat, streamChat, type ChatHistoryItem } from "../lib/api";
+import {
+  apiStartNewChatThread,
+  createManualTicket,
+  getChatHistory,
+  streamChat,
+} from "../lib/api";
 import { MessageBubble } from "./MessageBubble";
 
 type ChatMessage = {
@@ -52,12 +57,9 @@ export function ChatWindow() {
     setLoading(true);
 
     try {
-      const history: ChatHistoryItem[] = messages
-        .slice(-12)
-        .map((m) => ({
-          role: m.role === "bot" ? "assistant" : "user",
-          content: m.text,
-        }));
+      // Backend reads chat history from the DB on every turn, so we don't
+      // need to ship a copy from the client. Fewer bytes, fewer ways to
+      // diverge from server-side state.
       const streamIndex = nextMessages.length;
       setMessages([
         ...nextMessages,
@@ -67,7 +69,7 @@ export function ChatWindow() {
         },
       ]);
       let streamedText = "";
-      const result = await streamChat(userText, history, (delta) => {
+      const result = await streamChat(userText, (delta) => {
         streamedText += delta;
         setMessages((prev) =>
           prev.map((item, idx) =>
@@ -94,20 +96,45 @@ export function ChatWindow() {
         )
       );
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "bot", text: "Error contacting backend." },
-      ]);
+      const detail = err instanceof Error ? err.message : String(err);
+      const partial = Boolean((err as Error & { partial?: boolean })?.partial);
+      const hint =
+        /failed to fetch|networkerror|load failed/i.test(detail) &&
+        typeof window !== "undefined" &&
+        window.location.hostname !== "localhost" &&
+        window.location.hostname !== "127.0.0.1"
+          ? " If this device is not the machine running the API, set NEXT_PUBLIC_API_URL to the backend URL (same host as this page) and restart Next.js."
+          : "";
+      const message = `Error contacting backend: ${detail}${hint}`.slice(0, 1200);
+      if (partial) {
+        // Append error to the in-flight bot bubble so the user sees one
+        // continuous turn instead of "half answer + new error bubble".
+        setMessages((prev) => {
+          if (prev.length === 0) {
+            return [...prev, { role: "bot", text: message }];
+          }
+          const last = prev[prev.length - 1];
+          if (last.role !== "bot") {
+            return [...prev, { role: "bot", text: message }];
+          }
+          const merged = `${last.text}\n\n${message}`.slice(0, 4000);
+          return prev.map((item, idx) =>
+            idx === prev.length - 1 ? { ...item, text: merged } : item
+          );
+        });
+      } else {
+        setMessages((prev) => [...prev, { role: "bot", text: message }]);
+      }
     } finally {
       setLoading(false);
     }
   }
 
-  function startNewChat() {
+  function handleStartNewChat() {
     if (loading) return;
     void (async () => {
       try {
-        await startNewChat();
+        await apiStartNewChatThread();
         setMessages([]);
         setInput("");
       } catch {
@@ -190,7 +217,7 @@ export function ChatWindow() {
         />
         <button
           type="button"
-          onClick={startNewChat}
+          onClick={handleStartNewChat}
           disabled={loading}
           className="btn btn-ghost"
         >

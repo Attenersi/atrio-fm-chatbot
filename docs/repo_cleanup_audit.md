@@ -12,7 +12,7 @@ Reason: generated/local runtime artifacts, no source value.
 
 ## Medium confidence candidates
 
-- `backend/organize_test_files.py` (now kept as a compatibility wrapper to `backend/scripts/organize_test_files.py`)
+- `backend/organize_test_files.py` — removed; use `backend/scripts/organize_test_files.py` directly (`python -m backend.scripts.organize_test_files`)
 - `new_batches_question/*` (ad-hoc input batches)
 - `backend/tests/suites/28.04.2026, weird top10 ids.txt` (ephemeral helper list)
 

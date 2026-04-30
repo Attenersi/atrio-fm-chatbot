@@ -19,13 +19,16 @@ export function Sidebar() {
     ? [
         { href: "/chat", label: "Chat" },
         { href: "/dashboard", label: "Tickets" },
+        { href: "/help", label: "Help" },
         { href: "/admin", label: "Admin Settings" },
         { href: "/admin/training", label: "Training Review" },
+        { href: "/admin/training-quality", label: "Training Quality" },
       ]
     : role === "user"
       ? [
           { href: "/chat", label: "Chat" },
           { href: "/dashboard", label: "My Tickets" },
+          { href: "/help", label: "Help" },
         ]
       : [{ href: "/", label: "Sign in" }];
 

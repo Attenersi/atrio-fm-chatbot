@@ -43,11 +43,6 @@ export type AdminUserRow = {
   email: string | null;
 };
 
-export type ChatHistoryItem = {
-  role: "user" | "assistant";
-  content: string;
-};
-
 export type ChatStoredMessage = {
   id: number;
   thread_id: number;
@@ -169,26 +164,32 @@ async function req(path: string, init?: RequestInit) {
   return res.json();
 }
 
-export async function sendChat(message: string, history: ChatHistoryItem[] = []) {
-  return req("/api/chat", {
-    method: "POST",
-    body: JSON.stringify({ message, history }),
-  }) as Promise<ChatResponse>;
-}
-
 export async function streamChat(
   message: string,
-  history: ChatHistoryItem[],
   onChunk: (delta: string) => void
 ) {
+  // Server reads chat history from the DB; we intentionally do not send it
+  // from the client to keep a single source of truth.
   const res = await fetch(`${API_URL}/api/chat/stream`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, history }),
+    body: JSON.stringify({ message }),
   });
   if (!res.ok || !res.body) {
-    throw new Error(`Request failed: ${res.status}`);
+    if (res.status === 401) {
+      throw new Error("Not signed in (401). Open /login and sign in again.");
+    }
+    let detail = "";
+    try {
+      const body = await res.json();
+      if (typeof (body as { detail?: string })?.detail === "string") {
+        detail = ` — ${(body as { detail: string }).detail}`;
+      }
+    } catch {
+      /* ignore */
+    }
+    throw new Error(`Request failed: ${res.status}${detail}`);
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -218,7 +219,10 @@ export async function streamChat(
       } else if (evt.type === "final") {
         finalPayload = evt.payload as ChatResponse;
       } else if (evt.type === "error") {
-        throw new Error(String(evt.message ?? "Streaming failed"));
+        const err = new Error(String(evt.message ?? "Streaming failed"));
+        // Tag partial errors so the UI can preserve already-streamed text.
+        (err as Error & { partial?: boolean }).partial = Boolean(evt.partial);
+        throw err;
       }
     }
   }
@@ -235,7 +239,7 @@ export async function getChatHistory(limit = 200) {
   }>;
 }
 
-export async function startNewChat() {
+export async function apiStartNewChatThread() {
   return req("/api/chat/new", { method: "POST" }) as Promise<{
     thread: { id: number; user_id: number; is_active: boolean; title: string; created_at: string; updated_at: string };
   }>;
@@ -427,8 +431,144 @@ export async function adminListTrainingExamples(filters?: {
   return req(`/api/admin/training-examples${qs ? `?${qs}` : ""}`) as Promise<{ examples: TrainingExample[] }>;
 }
 
-export async function adminGetTrainingExample(exampleId: number) {
-  return req(`/api/admin/training-examples/${exampleId}`) as Promise<{ example: TrainingExample }>;
+export type TrainingQualityGroup = {
+  type: string;
+  count: number;
+  rag_signal: boolean;
+  affected_ids: number[];
+  examples_preview: Array<{
+    id: number;
+    input_excerpt: string;
+    expected: Record<string, any>;
+    actual: Record<string, any>;
+    source_type: string;
+  }>;
+};
+
+export type TrainingQualityGroups = {
+  total_pending: number;
+  groups: TrainingQualityGroup[];
+  generated_at: string;
+};
+
+export async function adminGetTrainingQualityGroups(limitPerGroup = 5) {
+  return req(
+    `/api/admin/training-quality/groups?limit_per_group=${limitPerGroup}`,
+  ) as Promise<TrainingQualityGroups>;
+}
+
+export type EvalRunSummary = {
+  id: number;
+  status: "running" | "done" | "error";
+  total: number;
+  passed: number;
+  accuracy_overall: number | null;
+  accuracy_category: number | null;
+  accuracy_priority: number | null;
+  accuracy_ticket_created: number | null;
+  accuracy_response_tokens: number | null;
+  started_at: string;
+  finished_at: string | null;
+  prompt_override_active_ids: number[];
+};
+
+export type EvalRunDetails = EvalRunSummary & {
+  details: { elapsed_seconds?: number; failures?: Array<{ case_id: string; failures: string[]; error: string | null }>; error?: string };
+};
+
+export async function adminStartEvalRun() {
+  return req("/api/admin/training-quality/eval/run", { method: "POST" }) as Promise<{
+    run_id: number;
+    status: string;
+  }>;
+}
+
+export async function adminListEvalRuns(limit = 20) {
+  return req(`/api/admin/training-quality/eval/runs?limit=${limit}`) as Promise<{
+    runs: EvalRunSummary[];
+  }>;
+}
+
+export async function adminGetEvalRun(runId: number) {
+  return req(`/api/admin/training-quality/eval/runs/${runId}`) as Promise<{
+    run: EvalRunDetails;
+  }>;
+}
+
+export type AnalyzerGroup = {
+  type: string;
+  suggested_change: string;
+  rationale: string;
+  confidence: number;
+  affected_ids: number[];
+};
+
+export type AnalyzerRagSuggestion = {
+  type: string;
+  description: string;
+  affected_ids: number[];
+};
+
+export type AnalyzerPayload = {
+  cached: boolean;
+  cache_key: string;
+  generated_at: string | null;
+  model: string | null;
+  groups: AnalyzerGroup[];
+  rag_suggestions: AnalyzerRagSuggestion[];
+};
+
+export async function adminGetTrainingQualityAnalysis() {
+  return req("/api/admin/training-quality/analysis") as Promise<AnalyzerPayload>;
+}
+
+export type PromptOverride = {
+  id: number;
+  error_type: string;
+  suggested_change: string;
+  approved_change: string;
+  status: "pending" | "active" | "rejected" | "superseded";
+  affected_example_ids: number[];
+  created_by_user_id: number | null;
+  created_at: string;
+  activated_at: string | null;
+  deactivated_at: string | null;
+  eval_baseline_id: number | null;
+  eval_after_id: number | null;
+  baseline_accuracy: number | null;
+  after_accuracy: number | null;
+};
+
+export async function adminListPromptOverrides(status?: string) {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return req(`/api/admin/training-quality/overrides${qs}`) as Promise<{
+    overrides: PromptOverride[];
+  }>;
+}
+
+export async function adminApplyPromptOverride(payload: {
+  error_type: string;
+  suggested_change?: string;
+  approved_change: string;
+  affected_example_ids: number[];
+  confidence?: number;
+  manually_edited?: boolean;
+}) {
+  return req("/api/admin/training-quality/overrides/apply", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }) as Promise<{
+    override: PromptOverride;
+    baseline: { id: number; accuracy_overall: number | null };
+    eval_after_run_id: number | null;
+  }>;
+}
+
+export async function adminRollbackPromptOverride(overrideId: number) {
+  return req(
+    `/api/admin/training-quality/overrides/${overrideId}/rollback`,
+    { method: "POST" },
+  ) as Promise<{ override: PromptOverride }>;
 }
 
 export async function adminUpdateTrainingExample(
@@ -447,33 +587,12 @@ export async function adminUpdateTrainingExample(
   }) as Promise<{ example: TrainingExample }>;
 }
 
-export async function adminExportTrainingExamples(correctionTypes = "approved,edited") {
-  const res = await fetch(
-    `${API_URL}/api/admin/training-examples/export?correction_types=${encodeURIComponent(correctionTypes)}`,
-    { credentials: "include" }
-  );
-  if (!res.ok) {
-    throw new Error(`Request failed: ${res.status}`);
-  }
-  return res.text();
-}
-
 export async function adminGetTrainingV1Manifest() {
   return req("/api/admin/training-examples/v1/manifest") as Promise<Record<string, any>>;
 }
 
 export async function adminExportTrainingV1Jsonl() {
   const res = await fetch(`${API_URL}/api/admin/training-examples/v1/export-jsonl`, {
-    credentials: "include",
-  });
-  if (!res.ok) {
-    throw new Error(`Request failed: ${res.status}`);
-  }
-  return res.text();
-}
-
-export async function adminExportTrainingV1Csv() {
-  const res = await fetch(`${API_URL}/api/admin/training-examples/v1/export-csv`, {
     credentials: "include",
   });
   if (!res.ok) {

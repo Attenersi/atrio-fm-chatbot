@@ -2,10 +2,34 @@ from __future__ import annotations
 
 import chromadb
 import re
+from collections import OrderedDict
 from pathlib import Path
 
-from .config import CHROMA_DIR
-from .llm import chat, chat_stream, embed
+from .config import CHROMA_DIR, RAG_QUERY_EMBED_CACHE_SIZE
+from .llm import achat, achat_stream, chat, chat_stream, embed
+
+_QUERY_EMBED_CACHE: OrderedDict[str, list[float]] = OrderedDict()
+
+
+def _normalize_query_embed_key(query: str) -> str:
+    return " ".join((query or "").strip().split())
+
+
+def _embed_query_for_retrieval(query: str) -> list[float]:
+    cap = max(0, int(RAG_QUERY_EMBED_CACHE_SIZE))
+    if cap <= 0:
+        return embed([query], input_type="query")[0]
+    key = _normalize_query_embed_key(query)
+    cached = _QUERY_EMBED_CACHE.get(key)
+    if cached is not None:
+        _QUERY_EMBED_CACHE.move_to_end(key)
+        return cached
+    vec = embed([query], input_type="query")[0]
+    _QUERY_EMBED_CACHE[key] = vec
+    _QUERY_EMBED_CACHE.move_to_end(key)
+    while len(_QUERY_EMBED_CACHE) > cap:
+        _QUERY_EMBED_CACHE.popitem(last=False)
+    return vec
 
 
 SYSTEM_PROMPT = """You are an FM (Facility Management) assistant for a commercial building.
@@ -197,7 +221,7 @@ def _rerank_context(
 
 def retrieve(query: str, k: int = 5) -> list[str]:
     collection = _collection()
-    q_emb = embed([query], input_type="query")[0]
+    q_emb = _embed_query_for_retrieval(query)
     result = collection.query(
         query_embeddings=[q_emb],
         n_results=max(k * 3, 12),
@@ -212,7 +236,7 @@ def retrieve(query: str, k: int = 5) -> list[str]:
 
 def retrieve_with_sources(query: str, k: int = 5) -> tuple[list[str], list[str]]:
     collection = _collection()
-    q_emb = embed([query], input_type="query")[0]
+    q_emb = _embed_query_for_retrieval(query)
     result = collection.query(
         query_embeddings=[q_emb],
         n_results=max(k * 3, 12),
@@ -234,11 +258,34 @@ def retrieve_with_sources(query: str, k: int = 5) -> tuple[list[str], list[str]]
     return context, sources
 
 
+def _build_override_block() -> str:
+    """Faza E: append-active overrides to the end of SYSTEM_PROMPT.
+    IMPORTANT: this block is concatenated AFTER `.format()`, never passed
+    through it — so an override containing literal `{` or `}` (e.g. JSON
+    examples) does not blow up the template engine."""
+    try:
+        from .database import get_active_prompt_overrides
+    except Exception:
+        return ""
+    overrides = get_active_prompt_overrides()
+    if not overrides:
+        return ""
+    bullets = "\n".join(
+        f"- {(o.get('approved_change') or '').strip()}" for o in overrides
+        if (o.get("approved_change") or "").strip()
+    )
+    if not bullets:
+        return ""
+    return f"\n\n## Additional rules (auto-tuned)\n{bullets}\n"
+
+
 def _conversation_messages(
     query: str, context: list[str], history: list[dict[str, str]] | None = None
 ) -> list[dict[str, str]]:
     context_blob = "\n\n---\n\n".join(context) if context else "No context found."
-    system = SYSTEM_PROMPT.format(context=context_blob, query=query)
+    # Format BASE prompt first, THEN concat override block. Overrides may contain
+    # `{` / `}`; running them through `.format()` would raise KeyError.
+    system = SYSTEM_PROMPT.format(context=context_blob, query=query) + _build_override_block()
     conversation: list[dict[str, str]] = [{"role": "system", "content": system}]
     for turn in history or []:
         role = turn.get("role", "")
@@ -262,3 +309,19 @@ def generate_stream(
 ):
     conversation = _conversation_messages(query, context, history)
     return chat_stream(conversation)
+
+
+async def agenerate(
+    query: str, context: list[str], history: list[dict[str, str]] | None = None
+) -> str:
+    conversation = _conversation_messages(query, context, history)
+    return await achat(conversation)
+
+
+async def agenerate_stream(
+    query: str, context: list[str], history: list[dict[str, str]] | None = None
+):
+    """Async generator yielding response chunks; mirrors generate_stream()."""
+    conversation = _conversation_messages(query, context, history)
+    async for chunk in achat_stream(conversation):
+        yield chunk

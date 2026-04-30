@@ -43,6 +43,29 @@ def _default_candidates_path() -> Path:
     return root / _CANDIDATES_FILE
 
 
+def _passes_review_policy(item: dict[str, Any]) -> bool:
+    """Mirrors database._include_in_review_candidates_jsonl to keep JSONL filter consistent."""
+    source_type = str(item.get("source_type", "") or "")
+    correction = _normalize_status(str(item.get("correction_type", "") or ""))
+    if source_type == "test_case":
+        return True
+    if correction == "edited":
+        return True
+    if source_type == "chat_log":
+        ticket_created = bool(item.get("ticket_created", False))
+        ideal = item.get("ideal_output") or {}
+        actual = item.get("actual_output") or {}
+        if not ticket_created:
+            ticket_created = bool(
+                (ideal.get("create_ticket") if isinstance(ideal, dict) else False)
+                or (actual.get("create_ticket") if isinstance(actual, dict) else False)
+                or item.get("ticket_id")
+            )
+        if ticket_created:
+            return True
+    return False
+
+
 def _record_key(item: dict[str, Any]) -> str:
     item_id_raw = item.get("id")
     try:
@@ -224,30 +247,30 @@ def bootstrap_from_examples(examples: list[dict[str, Any]], path: str | Path | N
             return len(existing)
         rows: list[dict[str, Any]] = []
         for row in examples:
-            rows.append(
-                _canonical_record(
-                    {
-                        "id": row.get("id"),
-                        "input": row.get("input_text", ""),
-                        "actual_output": row.get("actual_output", {}),
-                        "ideal_output": row.get("ideal_output") or row.get("actual_output", {}),
-                        "human_notes": row.get("human_notes", ""),
-                        "correction_type": row.get("correction_type", "pending"),
-                        "context_used": row.get("context_used", []),
-                        "reasoning": row.get("reasoning", ""),
-                        "source_type": row.get("source_type", ""),
-                        "source_id": row.get("source_id", ""),
-                        "source_ref": row.get("source_ref", ""),
-                        "user_role": row.get("user_role", ""),
-                        "query_type": row.get("query_type", ""),
-                        "ticket_id": row.get("ticket_id"),
-                        "created_at": row.get("created_at"),
-                        "reviewed_at": row.get("reviewed_at"),
-                        "knowledge_gap_logged": row.get("knowledge_gap_logged", False),
-                        "knowledge_gap_reason": row.get("knowledge_gap_reason", ""),
-                    }
-                )
-            )
+            normalized = {
+                "id": row.get("id"),
+                "input": row.get("input_text", ""),
+                "actual_output": row.get("actual_output", {}),
+                "ideal_output": row.get("ideal_output") or row.get("actual_output", {}),
+                "human_notes": row.get("human_notes", ""),
+                "correction_type": row.get("correction_type", "pending"),
+                "context_used": row.get("context_used", []),
+                "reasoning": row.get("reasoning", ""),
+                "source_type": row.get("source_type", ""),
+                "source_id": row.get("source_id", ""),
+                "source_ref": row.get("source_ref", ""),
+                "user_role": row.get("user_role", ""),
+                "query_type": row.get("query_type", ""),
+                "ticket_id": row.get("ticket_id"),
+                "ticket_created": row.get("ticket_created", False),
+                "created_at": row.get("created_at"),
+                "reviewed_at": row.get("reviewed_at"),
+                "knowledge_gap_logged": row.get("knowledge_gap_logged", False),
+                "knowledge_gap_reason": row.get("knowledge_gap_reason", ""),
+            }
+            if not _passes_review_policy(normalized):
+                continue
+            rows.append(_canonical_record(normalized))
         save_candidates(rows, path)
         return len(_dedupe_rows(rows))
 

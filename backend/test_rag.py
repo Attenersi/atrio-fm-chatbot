@@ -13,10 +13,11 @@ import urllib.request
 from dataclasses import dataclass
 from http.cookiejar import CookieJar
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Union
 
 # Each entry: plain string (must appear) or list of strings (any one must appear).
-ResponseTokenSpec = str | list[str]
+# `Union` (not `|`) so the module imports under Python 3.9 too.
+ResponseTokenSpec = Union[str, List[str]]
 TEST_OUTPUT_DIR = Path("tests")
 TEST_RESULTS_DIR = TEST_OUTPUT_DIR / "results"
 TEST_SUITES_DIR = TEST_OUTPUT_DIR / "suites"

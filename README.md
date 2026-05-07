@@ -49,7 +49,7 @@ npm install
 Create/edit `frontend/.env.local`:
 
 ```env
-NEXT_PUBLIC_API_URL=http://localhost:8010
+NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
 ### 3) Ingest FM docs (first run and after doc changes)
@@ -84,8 +84,8 @@ npm run dev
 ```
 
 This starts:
-- backend on `http://localhost:8010`
-- frontend on `http://localhost:3010`
+- backend on `http://localhost:8000`
+- frontend on `http://localhost:3000`
 
 ## Testing quality
 

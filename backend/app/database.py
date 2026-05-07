@@ -27,10 +27,6 @@ from .config import (
     TRAINING_DATA_AUTO_REFRESH_SECONDS,
     TRAINING_DATA_DIR,
 )
-from .training_json_store import export_jsonl as export_jsonl_from_store
-from .training_json_store import build_dataset_view as build_dataset_view_from_store
-from .training_json_store import save_candidates as save_json_candidates
-from .training_json_store import upsert_candidate as upsert_json_candidate
 
 
 ALLOWED_STATUS = {"Open", "In Progress", "Resolved"}
@@ -97,36 +93,6 @@ def _include_in_review_candidates_jsonl(item: dict[str, Any]) -> bool:
     if source_type == "chat_log" and ticket_created:
         return True
     return False
-
-
-def _sync_json_store_from_training_example(item: dict[str, Any]) -> None:
-    if not _include_in_review_candidates_jsonl(item):
-        return
-    try:
-        upsert_json_candidate(
-            {
-                "id": item.get("id"),
-                "input": item.get("input_text", ""),
-                "actual_output": item.get("actual_output", {}),
-                "ideal_output": item.get("ideal_output") or item.get("actual_output", {}),
-                "human_notes": item.get("human_notes", ""),
-                "correction_type": item.get("correction_type", "pending"),
-                "context_used": item.get("context_used", []),
-                "reasoning": item.get("reasoning", ""),
-                "source_type": item.get("source_type", ""),
-                "source_id": item.get("source_id", ""),
-                "source_ref": item.get("source_ref", ""),
-                "user_role": item.get("user_role", ""),
-                "query_type": item.get("query_type", ""),
-                "ticket_id": item.get("ticket_id"),
-                "created_at": item.get("created_at", _utc_now_iso()),
-                "reviewed_at": item.get("reviewed_at"),
-                "knowledge_gap_logged": bool(item.get("knowledge_gap_logged", False)),
-                "knowledge_gap_reason": item.get("knowledge_gap_reason", ""),
-            }
-        )
-    except Exception:
-        pass
 
 
 def _auto_refresh_v1_dataset_files() -> None:
@@ -770,15 +736,6 @@ def _sync_training_examples_from_override(
                 """,
                 (_json_dump(ideal), human_notes, _utc_now_iso(), int(row["id"])),
             )
-            _sync_json_store_from_training_example(
-                {
-                    **item,
-                    "correction_type": "edited",
-                    "ideal_output": ideal,
-                    "human_notes": human_notes,
-                    "reviewed_at": _utc_now_iso(),
-                }
-            )
             updated += 1
         conn.commit()
     return updated
@@ -1342,10 +1299,7 @@ def create_training_example(
         conn.commit()
         row = conn.execute("SELECT * FROM training_examples WHERE id = ?", (example_id,)).fetchone()
     _auto_refresh_v1_dataset_files()
-    item = _hydrate_training_example(row) if row else {}
-    if item:
-        _sync_json_store_from_training_example(item)
-    return item
+    return _hydrate_training_example(row) if row else {}
 
 
 def get_training_example(example_id: int) -> dict[str, Any]:
@@ -1870,10 +1824,116 @@ def update_training_example_review(
         conn.commit()
         row = conn.execute("SELECT * FROM training_examples WHERE id = ?", (example_id,)).fetchone()
     _auto_refresh_v1_dataset_files()
-    item = _hydrate_training_example(row) if row else {}
-    if item:
-        _sync_json_store_from_training_example(item)
-    return item
+    return _hydrate_training_example(row) if row else {}
+
+
+BULK_REVIEW_MAX_IDS = 500
+
+
+def bulk_update_training_examples_review(
+    ids: list[int],
+    updates: dict[str, Any],
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Mass-update review fields for many rows by ID.
+
+    Allowed keys in ``updates``:
+
+    - ``human_notes`` / ``reasoning``: full replacement if present in dict.
+    - ``correction_type``: if present, set to that value (must be in ALLOWED_CORRECTION_TYPES).
+
+    If only ``human_notes`` and/or ``reasoning`` are updated (no ``correction_type`` in
+    ``updates``), ``correction_type`` is forced to ``edited`` (same as single-record save).
+
+    If only ``correction_type`` is updated, notes and reasoning are left unchanged.
+    ``reviewed_at`` follows the same rule as ``update_training_example_review`` (set for
+    non-pending, cleared for pending).
+    """
+    touch_notes = "human_notes" in updates
+    touch_reasoning = "reasoning" in updates
+    touch_corr = "correction_type" in updates
+    if not touch_notes and not touch_reasoning and not touch_corr:
+        raise ValueError(
+            "At least one of human_notes, reasoning, or correction_type must be provided to update."
+        )
+    if touch_corr:
+        ct = str(updates["correction_type"] or "").strip()
+        if ct not in ALLOWED_CORRECTION_TYPES:
+            raise ValueError(
+                f"Invalid correction_type {ct!r}. Allowed: {', '.join(sorted(ALLOWED_CORRECTION_TYPES))}"
+            )
+    seen: set[int] = set()
+    clean_ids: list[int] = []
+    for raw in ids or []:
+        try:
+            i = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if i <= 0 or i in seen:
+            continue
+        seen.add(i)
+        clean_ids.append(i)
+    if not clean_ids:
+        raise ValueError("No valid positive integer IDs in list.")
+    if len(clean_ids) > BULK_REVIEW_MAX_IDS:
+        raise ValueError(f"Too many IDs (max {BULK_REVIEW_MAX_IDS}).")
+
+    placeholders = ",".join("?" for _ in clean_ids)
+    with get_conn() as conn:
+        existing_rows = conn.execute(
+            f"SELECT id FROM training_examples WHERE id IN ({placeholders})",
+            clean_ids,
+        ).fetchall()
+        existing_ids = {int(r["id"]) for r in existing_rows}
+        missing_ids = sorted(i for i in clean_ids if i not in existing_ids)
+
+        if dry_run:
+            return {
+                "dry_run": True,
+                "ids_requested": len(clean_ids),
+                "would_update": len(existing_ids),
+                "missing_ids": missing_ids,
+                "updated": 0,
+            }
+
+        updated = 0
+        for eid in clean_ids:
+            if eid not in existing_ids:
+                continue
+            row = conn.execute("SELECT * FROM training_examples WHERE id = ?", (eid,)).fetchone()
+            if not row:
+                continue
+            cur_h = _hydrate_training_example(row)
+            next_notes = (
+                str(updates["human_notes"]) if touch_notes else str(cur_h.get("human_notes", ""))
+            )
+            next_reasoning = (
+                str(updates["reasoning"]) if touch_reasoning else str(cur_h.get("reasoning", ""))
+            )
+            if touch_corr:
+                next_corr = str(updates["correction_type"]).strip()
+            else:
+                next_corr = "edited"
+            reviewed_at = _utc_now_iso() if next_corr != "pending" else None
+            conn.execute(
+                """
+                UPDATE training_examples
+                SET human_notes = ?, reasoning = ?, correction_type = ?, reviewed_at = ?
+                WHERE id = ?
+                """,
+                (next_notes, next_reasoning, next_corr, reviewed_at, eid),
+            )
+            updated += 1
+        conn.commit()
+
+    _auto_refresh_v1_dataset_files()
+    return {
+        "dry_run": False,
+        "ids_requested": len(clean_ids),
+        "updated": updated,
+        "missing_ids": missing_ids,
+    }
 
 
 def export_training_examples_jsonl(
@@ -2012,8 +2072,6 @@ def upsert_review_seed_example(
                 conn.commit()
                 row = conn.execute("SELECT * FROM training_examples WHERE id = ?", (int(existing["id"]),)).fetchone()
                 item = _hydrate_training_example(row) if row else {}
-                if item:
-                    _sync_json_store_from_training_example(item)
                 _maybe_update_mismatch_fields(
                     int(existing["id"]),
                     mismatch_fields=mismatch_fields,
@@ -2062,8 +2120,6 @@ def upsert_review_seed_example(
         conn.commit()
         row = conn.execute("SELECT * FROM training_examples WHERE id = ?", (ex_id,)).fetchone()
     item = _hydrate_training_example(row) if row else {}
-    if item:
-        _sync_json_store_from_training_example(item)
     _maybe_update_mismatch_fields(
         ex_id,
         mismatch_fields=mismatch_fields,
@@ -2195,6 +2251,64 @@ def _derive_test_row_mismatch(
     return deduped, exp_pl, act_pl
 
 
+def _looks_like_garbage_input(message: str) -> bool:
+    raw = (message or "").strip()
+    if not raw:
+        return True
+    # Very short and non-informative inputs should not enter training.
+    if len(raw) < 4:
+        return True
+    normalized = _normalize_input_text(raw)
+    if not normalized:
+        return True
+    # Repeated single-char noise e.g. "aaaaaa", "??????".
+    compact = normalized.replace(" ", "")
+    if len(set(compact)) == 1 and len(compact) >= 6:
+        return True
+    return False
+
+
+def _is_corrupted_test_payload(expected: dict[str, Any], actual: dict[str, Any]) -> bool:
+    if not isinstance(expected, dict) or not isinstance(actual, dict):
+        return True
+    if not expected and not actual:
+        return True
+    # Missing all key prediction fields is considered unusable for supervised review.
+    has_any_signal = any(
+        k in actual for k in ("category", "priority", "ticket_created", "response", "issue_summary")
+    ) or any(k in expected for k in ("category", "priority", "ticket_created"))
+    return not has_any_signal
+
+
+def _auto_review_bucket_for_test_case(
+    *,
+    message: str,
+    expected: dict[str, Any],
+    actual: dict[str, Any],
+    is_pass: bool,
+    failures: list[Any],
+    mismatch_fields: list[str],
+) -> tuple[str, str]:
+    """
+    Practical triage:
+      - approved: high certainty only
+      - rejected: hard-fail / low-value rows only
+      - pending: default bucket
+    """
+    if _looks_like_garbage_input(message):
+        return "rejected", "Auto-rejected: low-quality input (empty/spam/nonsense)."
+    if _is_corrupted_test_payload(expected, actual):
+        return "rejected", "Auto-rejected: corrupted or unusable test payload."
+
+    if is_pass and not failures and not mismatch_fields:
+        return "approved", "Auto-approved from passing test case."
+
+    fail_blob = " | ".join([str(x) for x in failures or []]).strip()
+    if fail_blob:
+        return "pending", f"Needs review: {fail_blob}"
+    return "pending", "Needs review: uncertain quality."
+
+
 def backfill_training_examples_from_test_results(results_path: str) -> dict[str, Any]:
     path = Path(results_path)
     data = _json_load(path.read_text(encoding="utf-8"), {})
@@ -2202,6 +2316,7 @@ def backfill_training_examples_from_test_results(results_path: str) -> dict[str,
     processed = 0
     approved = 0
     pending = 0
+    rejected = 0
     for row in results:
         case_id = str(row.get("id", "")).strip()
         if not case_id:
@@ -2223,18 +2338,23 @@ def backfill_training_examples_from_test_results(results_path: str) -> dict[str,
             "issue_summary": actual.get("issue_summary") or msg,
         }
         is_pass = bool(row.get("pass"))
-        corr = "approved" if is_pass else "pending"
-        notes = "Auto-approved from passing test case." if is_pass else "Needs review: " + " | ".join(
-            [str(x) for x in row.get("failures", [])]
-        )
+        failures = list(row.get("failures", []) or [])
         if is_pass:
             mismatch_fields_v: list[str] = []
             expected_pl_v: dict[str, Any] = {}
             actual_pl_v: dict[str, Any] = {}
         else:
             mismatch_fields_v, expected_pl_v, actual_pl_v = _derive_test_row_mismatch(
-                expected, actual, row.get("failures") or []
+                expected, actual, failures
             )
+        corr, notes = _auto_review_bucket_for_test_case(
+            message=msg,
+            expected=expected,
+            actual=actual,
+            is_pass=is_pass,
+            failures=failures,
+            mismatch_fields=mismatch_fields_v,
+        )
         upsert_review_seed_example(
             source_type="test_case",
             source_id=case_id,
@@ -2266,48 +2386,84 @@ def backfill_training_examples_from_test_results(results_path: str) -> dict[str,
             actual_payload=actual_pl_v,
         )
         processed += 1
-        if is_pass:
+        if corr == "approved":
             approved += 1
+        elif corr == "rejected":
+            rejected += 1
         else:
             pending += 1
     _auto_refresh_v1_dataset_files()
-    return {"processed": processed, "approved_seeded": approved, "pending_seeded": pending}
+    return {
+        "processed": processed,
+        "approved_seeded": approved,
+        "pending_seeded": pending,
+        "rejected_seeded": rejected,
+    }
+
+
+def _to_v1_dataset_row(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": int(item.get("id", 0) or 0),
+        "input_text": item.get("input_text", ""),
+        "actual_output": item.get("actual_output", {}),
+        "ideal_output": item.get("ideal_output") or item.get("actual_output", {}),
+        "human_notes": item.get("human_notes", ""),
+        "correction_type": item.get("correction_type", "pending"),
+        "context_used": item.get("context_used", []),
+        "reasoning": item.get("reasoning", ""),
+        "source_type": item.get("source_type", ""),
+        "source_id": item.get("source_id", ""),
+        "source_ref": item.get("source_ref", ""),
+        "user_role": item.get("user_role", ""),
+        "query_type": item.get("query_type", ""),
+        "ticket_id": item.get("ticket_id"),
+        "created_at": item.get("created_at", _utc_now_iso()),
+        "reviewed_at": item.get("reviewed_at"),
+        "knowledge_gap_logged": bool(item.get("knowledge_gap_logged", False)),
+        "knowledge_gap_reason": item.get("knowledge_gap_reason", ""),
+    }
 
 
 def build_v1_dataset_view() -> dict[str, Any]:
-    return build_dataset_view_from_store()
+    rows = get_training_examples(limit=500000, offset=0)
+    all_rows = [_to_v1_dataset_row(r) for r in rows if _include_in_review_candidates_jsonl(r)]
+    train_rows = [
+        r for r in all_rows if str(r.get("correction_type", "")).strip().lower() == "edited"
+    ]
+    review_rows = [
+        r
+        for r in all_rows
+        if str(r.get("correction_type", "")).strip().lower() in {"pending", "rejected"}
+    ]
+    by_status: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    for row in all_rows:
+        s = str(row.get("correction_type", "pending")).strip().lower() or "pending"
+        by_status[s] = by_status.get(s, 0) + 1
+        src = str(row.get("source_type", "") or "unknown")
+        by_source[src] = by_source.get(src, 0) + 1
+    return {
+        "all_rows": all_rows,
+        "train_rows": train_rows,
+        "review_rows": review_rows,
+        "manifest": {
+            "version": "db-first-v1",
+            "total_raw_rows": len(all_rows),
+            "train_rows": len(train_rows),
+            "review_rows": len(review_rows),
+            "by_status": by_status,
+            "by_source_type": by_source,
+            "updated_at": _utc_now_iso(),
+        },
+    }
 
 
 def rebuild_json_store_from_db() -> dict[str, Any]:
-    rows = get_training_examples(limit=500000, offset=0)
-    payload: list[dict[str, Any]] = []
-    for item in rows:
-        if not _include_in_review_candidates_jsonl(item):
-            continue
-        payload.append(
-            {
-                "id": item.get("id"),
-                "input": item.get("input_text", ""),
-                "actual_output": item.get("actual_output", {}),
-                "ideal_output": item.get("ideal_output") or item.get("actual_output", {}),
-                "human_notes": item.get("human_notes", ""),
-                "correction_type": item.get("correction_type", "pending"),
-                "context_used": item.get("context_used", []),
-                "reasoning": item.get("reasoning", ""),
-                "source_type": item.get("source_type", ""),
-                "source_id": item.get("source_id", ""),
-                "source_ref": item.get("source_ref", ""),
-                "user_role": item.get("user_role", ""),
-                "query_type": item.get("query_type", ""),
-                "ticket_id": item.get("ticket_id"),
-                "created_at": item.get("created_at", _utc_now_iso()),
-                "reviewed_at": item.get("reviewed_at"),
-                "knowledge_gap_logged": bool(item.get("knowledge_gap_logged", False)),
-                "knowledge_gap_reason": item.get("knowledge_gap_reason", ""),
-            }
-        )
-    save_json_candidates(payload)
-    return {"rows_written": len(payload)}
+    result = write_v1_dataset_files(TRAINING_DATA_DIR)
+    return {
+        "rows_written": int(result.get("manifest", {}).get("total_raw_rows", 0)),
+        "paths": result.get("paths", {}),
+    }
 
 
 def prune_training_examples_for_review_policy() -> dict[str, Any]:
@@ -2402,8 +2558,65 @@ def cleanup_training_examples_and_candidates() -> dict[str, Any]:
     }
 
 
+def mass_mark_all_edited_if_any_custom_reasoning() -> dict[str, Any]:
+    marker = "seeded from test suite result"
+    now = _utc_now_iso()
+    with get_conn() as conn:
+        total = int(conn.execute("SELECT COUNT(*) FROM training_examples").fetchone()[0])
+        has_custom = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM training_examples
+                WHERE lower(trim(COALESCE(reasoning, ''))) <> ?
+                """,
+                (marker,),
+            ).fetchone()[0]
+        )
+        if has_custom == 0:
+            return {"changed": 0, "total": total, "applied": False, "backup_path": None}
+        changed = conn.execute(
+            """
+            UPDATE training_examples
+            SET correction_type = 'edited',
+                reviewed_at = COALESCE(NULLIF(reviewed_at, ''), ?)
+            WHERE lower(COALESCE(correction_type, 'pending')) <> 'edited'
+            """,
+            (now,),
+        ).rowcount
+        conn.commit()
+    _auto_refresh_v1_dataset_files()
+    return {"changed": int(changed or 0), "total": total, "applied": True, "backup_path": None}
+
+
 def export_v1_jsonl(rows: list[dict[str, Any]]) -> str:
-    return export_jsonl_from_store(rows)
+    lines: list[str] = []
+    for row in rows:
+        ideal = row.get("ideal_output") or row.get("actual_output") or {}
+        lines.append(
+            _json_dump(
+                {
+                    "id": row.get("id"),
+                    "input": row.get("input_text", ""),
+                    "ideal_output": {
+                        "category": ideal.get("category"),
+                        "priority": ideal.get("priority"),
+                        "create_ticket": bool(ideal.get("create_ticket")),
+                        "response": ideal.get("response"),
+                        "issue_summary": ideal.get("issue_summary"),
+                    },
+                    "human_notes": row.get("human_notes", ""),
+                    "correction_type": row.get("correction_type", "pending"),
+                    "context_used": row.get("context_used", []),
+                    "reasoning": row.get("reasoning", ""),
+                    "source_type": row.get("source_type", ""),
+                    "source_id": row.get("source_id", ""),
+                    "source_ref": row.get("source_ref", ""),
+                    "created_at": row.get("created_at", ""),
+                }
+            )
+        )
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 def export_v1_review_csv(rows: list[dict[str, Any]]) -> str:

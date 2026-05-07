@@ -19,9 +19,6 @@ backend/data/*.pre_user_replace_backup.jsonl
 backend/tickets.backup_*.db
 
 # Stray DB files if backend is started from the wrong CWD.
-/tickets.db
-/tickets.db-shm
-/tickets.db-wal
 
 # Env
 .env

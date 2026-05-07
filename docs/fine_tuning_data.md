@@ -8,15 +8,15 @@ for future model fine-tuning.
 Capture every executed query as a training-example candidate, then curate it
 into a high-quality JSONL dataset.
 
-## JSON-first source of truth
+## DB-first source of truth
 
 Canonical store for review state is now:
 
-- `backend/data/fine_tuning_v1_candidates.jsonl`
+- SQLite table `training_examples` in `backend/tickets.db`
 
-Operational SQLite (`training_examples`) is still maintained for compatibility,
-but frontend review endpoints are JSON-first and every status edit (`pending`,
-`approved`, `edited`, `rejected`) is persisted directly in the candidates file.
+`backend/data/fine_tuning_v1_candidates.jsonl` is generated as an export
+artifact. Runtime admin APIs (review/list/update) read and write SQLite, not
+the JSONL file.
 
 Status compatibility rule:
 
@@ -93,8 +93,17 @@ Recommended export policy:
 4. For `edited`, admin adjusts `ideal_output`, adds `human_notes`, and `reasoning`.
 5. Admin exports filtered JSONL for training.
 
-Every write path (chat ingestion, test backfill, admin review edit) upserts the
-same canonical candidates file.
+Every write path (chat ingestion, test backfill, admin review edit) persists to
+`training_examples`. Export jobs then build JSONL/CSV artifacts from DB data.
+
+## Important operational note
+
+Manual edits to `fine_tuning_v1_candidates.jsonl` are not ingested automatically.
+If you edited JSONL on another machine, import those fields back to DB with a
+migration script first, then regenerate export artifacts.
+
+`fine_tuning_v1_reviewed.jsonl` should be treated the same way: useful as a
+portable backup/export snapshot, but not as a runtime source for FM Review.
 
 ## Data quality rules
 

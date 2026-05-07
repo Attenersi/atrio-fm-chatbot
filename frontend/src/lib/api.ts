@@ -1,4 +1,4 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8010";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export type ChatResponse = {
   category: string;
@@ -537,6 +537,22 @@ export type PromptOverride = {
   eval_after_id: number | null;
   baseline_accuracy: number | null;
   after_accuracy: number | null;
+  metrics?: {
+    baseline: {
+      overall: number | null;
+      category: number | null;
+      priority: number | null;
+      ticket_created: number | null;
+      response_tokens: number | null;
+    };
+    after: {
+      overall: number | null;
+      category: number | null;
+      priority: number | null;
+      ticket_created: number | null;
+      response_tokens: number | null;
+    };
+  };
 };
 
 export async function adminListPromptOverrides(status?: string) {
@@ -587,8 +603,54 @@ export async function adminUpdateTrainingExample(
   }) as Promise<{ example: TrainingExample }>;
 }
 
+export type AdminBulkTrainingReviewResult = {
+  ok: boolean;
+  dry_run: boolean;
+  ids_requested: number;
+  updated: number;
+  would_update?: number;
+  missing_ids: number[];
+};
+
+export async function adminBulkTrainingExamplesReview(
+  payload: {
+    ids: number[];
+    human_notes?: string | null;
+    reasoning?: string | null;
+    correction_type?: "pending" | "approved" | "edited" | "rejected" | null;
+  },
+  opts: { confirm?: boolean; dryRun?: boolean } = {}
+) {
+  const params = new URLSearchParams();
+  if (opts.dryRun) params.set("dry_run", "true");
+  if (opts.confirm) params.set("confirm", "true");
+  const qs = params.toString();
+  const body: Record<string, unknown> = { ids: payload.ids };
+  if (payload.human_notes !== undefined) body.human_notes = payload.human_notes;
+  if (payload.reasoning !== undefined) body.reasoning = payload.reasoning;
+  if (payload.correction_type !== undefined) body.correction_type = payload.correction_type;
+  return req(`/api/admin/training-examples/bulk-review${qs ? `?${qs}` : ""}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  }) as Promise<AdminBulkTrainingReviewResult>;
+}
+
 export async function adminGetTrainingV1Manifest() {
   return req("/api/admin/training-examples/v1/manifest") as Promise<Record<string, any>>;
+}
+
+export type TrainingV1ExportFile = {
+  name: string;
+  path: string;
+  size_bytes: number;
+  updated_at: string;
+};
+
+export async function adminListTrainingV1Exports(limit = 20) {
+  return req(`/api/admin/training-examples/v1/exports?limit=${encodeURIComponent(String(limit))}`) as Promise<{
+    exports: TrainingV1ExportFile[];
+    dir: string;
+  }>;
 }
 
 export async function adminExportTrainingV1Jsonl() {

@@ -6,7 +6,9 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 import uvicorn
 from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -76,6 +78,7 @@ from .database import (
     list_eval_runs,
     list_pending_grouped,
     list_prompt_overrides,
+    mass_mark_all_edited_if_any_custom_reasoning,
     apply_prompt_override as db_apply_prompt_override,
     rollback_prompt_override as db_rollback_prompt_override,
     set_prompt_override_eval_after,
@@ -91,6 +94,7 @@ from .database import (
     export_training_examples_jsonl,
     backfill_training_examples_from_tickets,
     backfill_training_examples_from_test_results,
+    bulk_update_training_examples_review,
     build_v1_dataset_view,
     export_v1_jsonl,
     export_v1_review_csv,
@@ -101,13 +105,6 @@ from .ingest import run_ingest
 from .eval_runner import EvalSummary, load_golden, run_eval
 from .llm import chat_with_health_timeout, embed
 from .rag import agenerate, agenerate_stream, retrieve_with_sources
-from .training_json_store import (
-    bootstrap_from_examples,
-    get_candidate_for_api,
-    list_candidates_for_api,
-    mass_mark_all_edited_if_any_custom_reasoning,
-    update_candidate_review_for_api,
-)
 
 
 _obs_log = logging.getLogger("fm.observability")
@@ -218,6 +215,13 @@ class AdminTrainingExampleUpdateRequest(BaseModel):
     human_notes: str | None = None
     context_used: list[str] | None = None
     reasoning: str | None = None
+
+
+class AdminTrainingBulkReviewRequest(BaseModel):
+    ids: list[int]
+    human_notes: str | None = None
+    reasoning: str | None = None
+    correction_type: str | None = None
 
 
 class AdminV1BuildRequest(BaseModel):
@@ -1162,10 +1166,6 @@ def _finalize_chat_payload(
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
-    try:
-        bootstrap_from_examples(get_training_examples(limit=200000, offset=0))
-    except Exception:
-        _obs_log.exception("bootstrap_from_examples failed at startup")
     _start_training_dataset_scheduler()
 
 
@@ -1790,7 +1790,7 @@ def api_admin_training_examples(
     offset: int = Query(default=0, ge=0),
     _: dict = Depends(_require_admin),
 ) -> dict:
-    rows = list_candidates_for_api(
+    rows = get_training_examples(
         correction_type=correction_type,
         user_role=user_role,
         limit=limit,
@@ -2016,16 +2016,45 @@ def api_admin_overrides_list(
         after_id = it.get("eval_after_id")
         baseline_acc = None
         after_acc = None
+        baseline_metrics = {
+            "overall": None,
+            "category": None,
+            "priority": None,
+            "ticket_created": None,
+            "response_tokens": None,
+        }
+        after_metrics = {
+            "overall": None,
+            "category": None,
+            "priority": None,
+            "ticket_created": None,
+            "response_tokens": None,
+        }
         if baseline_id:
             b = get_eval_run(int(baseline_id))
             if b:
                 baseline_acc = b.get("accuracy_overall")
+                baseline_metrics = {
+                    "overall": b.get("accuracy_overall"),
+                    "category": b.get("accuracy_category"),
+                    "priority": b.get("accuracy_priority"),
+                    "ticket_created": b.get("accuracy_ticket_created"),
+                    "response_tokens": b.get("accuracy_response_tokens"),
+                }
         if after_id:
             a = get_eval_run(int(after_id))
             if a:
                 after_acc = a.get("accuracy_overall")
+                after_metrics = {
+                    "overall": a.get("accuracy_overall"),
+                    "category": a.get("accuracy_category"),
+                    "priority": a.get("accuracy_priority"),
+                    "ticket_created": a.get("accuracy_ticket_created"),
+                    "response_tokens": a.get("accuracy_response_tokens"),
+                }
         it["baseline_accuracy"] = baseline_acc
         it["after_accuracy"] = after_acc
+        it["metrics"] = {"baseline": baseline_metrics, "after": after_metrics}
         enriched.append(it)
     return {"overrides": enriched}
 
@@ -2086,7 +2115,7 @@ def api_admin_training_example_by_id(
     example_id: int,
     _: dict = Depends(_require_admin),
 ) -> dict:
-    item = get_candidate_for_api(example_id)
+    item = get_training_example(example_id)
     if not item:
         raise HTTPException(status_code=404, detail="Training example not found")
     return {"example": item}
@@ -2099,31 +2128,52 @@ def api_admin_training_example_update(
     _: dict = Depends(_require_admin),
 ) -> dict:
     try:
-        item = update_candidate_review_for_api(
-            example_id=example_id,
+        item = update_training_example_review(
+            example_id,
             correction_type=req.correction_type,
             ideal_output=req.ideal_output,
             human_notes=req.human_notes,
             context_used=req.context_used,
             reasoning=req.reasoning,
         )
-        # Keep SQLite mirrored for operational compatibility.
-        try:
-            update_training_example_review(
-                example_id,
-                correction_type=req.correction_type,
-                ideal_output=req.ideal_output,
-                human_notes=req.human_notes,
-                context_used=req.context_used,
-                reasoning=req.reasoning,
-            )
-        except Exception:
-            _obs_log.exception("create_training_example failed (chat append fallback)")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not item:
         raise HTTPException(status_code=404, detail="Training example not found")
     return {"example": item}
+
+
+@app.post("/api/admin/training-examples/bulk-review")
+def api_admin_training_bulk_review(
+    req: AdminTrainingBulkReviewRequest,
+    confirm: bool = Query(default=False),
+    dry_run: bool = Query(default=False),
+    _: dict = Depends(_require_admin),
+) -> dict:
+    if not dry_run and not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Bulk update affects many rows. Pass ?confirm=true to apply, or ?dry_run=true to preview only."
+            ),
+        )
+    payload = req.model_dump(exclude_unset=True)
+    ids = payload.get("ids", [])
+    updates: dict[str, Any] = {}
+    if "human_notes" in payload:
+        v = payload["human_notes"]
+        updates["human_notes"] = "" if v is None else str(v)
+    if "reasoning" in payload:
+        v = payload["reasoning"]
+        updates["reasoning"] = "" if v is None else str(v)
+    if "correction_type" in payload:
+        ct = str(payload["correction_type"] or "").strip()
+        updates["correction_type"] = ct
+    try:
+        result = bulk_update_training_examples_review(ids, updates, dry_run=dry_run)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, **result}
 
 
 @app.get("/api/admin/training-examples/export")
@@ -2169,6 +2219,40 @@ def api_admin_training_examples_v1_manifest(
     return {"manifest": view["manifest"]}
 
 
+@app.get("/api/admin/training-examples/v1/exports")
+def api_admin_training_examples_v1_exports(
+    limit: int = Query(default=20, ge=1, le=200),
+    _: dict = Depends(_require_admin),
+) -> dict:
+    base = Path(TRAINING_DATA_DIR)
+    if not base.is_absolute():
+        base = (_backend_root() / base).resolve()
+    items: list[dict[str, Any]] = []
+    if base.exists():
+        for p in base.iterdir():
+            if not p.is_file():
+                continue
+            name = p.name
+            if not (
+                name.startswith("fine_tuning_v1_")
+                or name.startswith("fine_tuning_v1.")
+                or name.endswith(".jsonl")
+                or name.endswith(".csv")
+            ):
+                continue
+            st = p.stat()
+            items.append(
+                {
+                    "name": name,
+                    "path": str(p),
+                    "size_bytes": int(st.st_size),
+                    "updated_at": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(),
+                }
+            )
+    items.sort(key=lambda x: str(x.get("updated_at", "")), reverse=True)
+    return {"exports": items[:limit], "dir": str(base)}
+
+
 @app.get("/api/admin/training-examples/v1/export-jsonl")
 def api_admin_training_examples_v1_export_jsonl(
     mode: str = Query(default="train"),  # train | candidates
@@ -2200,8 +2284,7 @@ def api_admin_training_examples_v1_build_files(
     test_path = Path(req.test_results_path)
     if not test_path.is_absolute():
         test_path = (_backend_root() / test_path).resolve()
-    # JSON-first mode: build-files does not run backfills.
-    # New records should come only from normal chat/test flows and manual review edits.
+    # DB-first mode: build-files only regenerates export artifacts from SQLite.
     out_dir = Path(req.output_dir)
     if not out_dir.is_absolute():
         out_dir = (_backend_root() / out_dir).resolve()

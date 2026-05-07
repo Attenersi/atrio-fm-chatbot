@@ -41,7 +41,7 @@ Development:
 Alternative:
 
 ```powershell
-uvicorn app.main:app --reload --port 8010
+uvicorn app.main:app --reload --port 8000
 ```
 
 ## Ingest docs

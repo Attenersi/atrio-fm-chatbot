@@ -372,6 +372,9 @@ Training Review to panel do przeglądania przykładów treningowych. Każda rozm
 - **Export CSV** — arkusz do przeglądania w Excelu
 - **Build V1 Files** — generuje wszystkie pliki treningowe w folderze `data/`
 
+> Uwaga: plik `fine_tuning_v1_candidates.jsonl` jest artefaktem eksportu z bazy.
+> Ręczne edycje tego pliku nie aktualizują automatycznie danych w panelu admina.
+
 ### Czego NIE robić
 
 - Nie zatwierdzaj przykładów na ślepo — sprawdź czy kategoria i priorytet są poprawne.

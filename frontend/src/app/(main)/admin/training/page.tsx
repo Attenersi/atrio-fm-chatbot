@@ -3,12 +3,15 @@
 import { type CSSProperties, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  adminBulkTrainingExamplesReview,
   adminBuildTrainingV1Files,
   adminExportTrainingV1Jsonl,
   adminGetTrainingV1Manifest,
+  adminListTrainingV1Exports,
   adminListTrainingExamples,
   adminUpdateTrainingExample,
   getSession,
+  type TrainingV1ExportFile,
   type TrainingExample,
 } from "../../../../lib/api";
 
@@ -20,6 +23,20 @@ function normalizeReviewStatus(value: string) {
 const STATUSES = ["pending", "approved", "edited", "rejected"] as const;
 const CATEGORIES = ["General", "Safety", "Plumbing", "HVAC", "Electrical"] as const;
 const PRIORITIES = ["LOW", "NORMAL", "HIGH", "URGENT"] as const;
+
+function parseBulkIds(raw: string): number[] {
+  const seen = new Set<number>();
+  const out: number[] = [];
+  for (const part of raw.split(/[\s,;]+/)) {
+    const t = part.trim();
+    if (!t) continue;
+    const n = Number.parseInt(t, 10);
+    if (!Number.isFinite(n) || n <= 0 || seen.has(n)) continue;
+    seen.add(n);
+    out.push(n);
+  }
+  return out;
+}
 
 export default function AdminTrainingReviewPage() {
   const router = useRouter();
@@ -36,6 +53,14 @@ export default function AdminTrainingReviewPage() {
   const [status, setStatus] = useState("Loading training examples...");
   const [manifest, setManifest] = useState<Record<string, any> | null>(null);
   const [showStats, setShowStats] = useState(false);
+  const [showExports, setShowExports] = useState(false);
+  const [exportsList, setExportsList] = useState<TrainingV1ExportFile[]>([]);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkIdsRaw, setBulkIdsRaw] = useState("");
+  const [bulkHumanNotes, setBulkHumanNotes] = useState("");
+  const [bulkReasoning, setBulkReasoning] = useState("");
+  const [bulkCorrectionType, setBulkCorrectionType] = useState<(typeof STATUSES)[number] | "">("");
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   useEffect(() => {
     getSession()
@@ -89,6 +114,12 @@ export default function AdminTrainingReviewPage() {
       } catch {
         setManifest(null);
       }
+      try {
+        const ex = await adminListTrainingV1Exports(20);
+        setExportsList(ex.exports ?? []);
+      } catch {
+        setExportsList([]);
+      }
       setCurrentIndex(0);
       setStatus(`Loaded ${res.examples.length} examples.`);
     } catch (err) {
@@ -138,9 +169,92 @@ export default function AdminTrainingReviewPage() {
 
   async function saveEdit() {
     if (!editedEntry) return;
-    await submitReview(editedEntry, normalizeReviewStatus(editedEntry.correction_type) as any);
+    const editedPayload: TrainingExample = {
+      ...editedEntry,
+      correction_type: "edited",
+    };
+    await submitReview(editedPayload, "edited");
     setEditMode(false);
     setEditedEntry(null);
+  }
+
+  function buildBulkBody(): {
+    ids: number[];
+    human_notes?: string;
+    reasoning?: string;
+    correction_type?: (typeof STATUSES)[number];
+  } | null {
+    const ids = parseBulkIds(bulkIdsRaw);
+    const hasNotes = bulkHumanNotes.trim() !== "";
+    const hasReasoning = bulkReasoning.trim() !== "";
+    const hasStatus = bulkCorrectionType !== "";
+    if (!ids.length || (!hasNotes && !hasReasoning && !hasStatus)) return null;
+    const body: {
+      ids: number[];
+      human_notes?: string;
+      reasoning?: string;
+      correction_type?: (typeof STATUSES)[number];
+    } = { ids };
+    if (hasNotes) body.human_notes = bulkHumanNotes;
+    if (hasReasoning) body.reasoning = bulkReasoning;
+    if (hasStatus) body.correction_type = bulkCorrectionType;
+    return body;
+  }
+
+  async function runBulkPreview() {
+    const body = buildBulkBody();
+    if (!body) {
+      setStatus("Bulk: paste at least one valid ID and set Status and/or Human notes and/or Reasoning.");
+      return;
+    }
+    setBulkBusy(true);
+    setStatus("Bulk preview…");
+    try {
+      const res = await adminBulkTrainingExamplesReview(body, { dryRun: true });
+      const miss = res.missing_ids?.length
+        ? ` Missing IDs: ${res.missing_ids.slice(0, 25).join(", ")}${res.missing_ids.length > 25 ? "…" : ""}.`
+        : "";
+      setStatus(`Preview: would update ${res.would_update ?? 0} of ${res.ids_requested} IDs.${miss}`);
+    } catch (err) {
+      setStatus(`Bulk preview failed: ${(err as Error).message}`);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function runBulkApply() {
+    const body = buildBulkBody();
+    if (!body) {
+      setStatus("Bulk: paste at least one valid ID and set Status and/or Human notes and/or Reasoning.");
+      return;
+    }
+    const statusHint =
+      body.correction_type != null
+        ? `Status → ${body.correction_type}.`
+        : body.human_notes != null || body.reasoning != null
+          ? "Notes/reasoning only → status becomes edited."
+          : "";
+    if (
+      !window.confirm(
+        `Apply bulk update to ${body.ids.length} example(s)? ${statusHint} Continue?`
+      )
+    ) {
+      return;
+    }
+    setBulkBusy(true);
+    setStatus("Bulk apply…");
+    try {
+      const res = await adminBulkTrainingExamplesReview(body, { confirm: true });
+      const miss = res.missing_ids?.length
+        ? ` Missing IDs: ${res.missing_ids.slice(0, 25).join(", ")}${res.missing_ids.length > 25 ? "…" : ""}.`
+        : "";
+      setStatus(`Bulk: updated ${res.updated} row(s).${miss}`);
+      await loadRows();
+    } catch (err) {
+      setStatus(`Bulk apply failed: ${(err as Error).message}`);
+    } finally {
+      setBulkBusy(false);
+    }
   }
 
   async function quickApprove() {
@@ -180,8 +294,18 @@ export default function AdminTrainingReviewPage() {
       const content = await adminExportTrainingV1Jsonl();
       downloadText("fine_tuning_v1_train.jsonl", content);
       setStatus("Exported v1 JSONL.");
+      await refreshExports();
     } catch (err) {
       setStatus(`Export failed: ${(err as Error).message}`);
+    }
+  }
+
+  async function refreshExports() {
+    try {
+      const ex = await adminListTrainingV1Exports(20);
+      setExportsList(ex.exports ?? []);
+    } catch {
+      setExportsList([]);
     }
   }
 
@@ -199,6 +323,7 @@ export default function AdminTrainingReviewPage() {
       } catch {
         setManifest(null);
       }
+      await refreshExports();
     } catch (err) {
       setStatus(`Build failed: ${(err as Error).message}`);
     }
@@ -210,7 +335,6 @@ export default function AdminTrainingReviewPage() {
       pending: 0,
       approved: 0,
       edited: 0,
-      corrected: 0,
       rejected: 0,
       kg: 0,
     };
@@ -221,7 +345,6 @@ export default function AdminTrainingReviewPage() {
       else if (s === "approved") base.approved += 1;
       else if (s === "edited") base.edited += 1;
       else if (s === "rejected") base.rejected += 1;
-      if (raw === "corrected") base.corrected += 1;
       if (row.knowledge_gap_logged) base.kg += 1;
     }
     return base;
@@ -315,6 +438,9 @@ export default function AdminTrainingReviewPage() {
           <button onClick={() => setShowStats(!showStats)} style={showStats ? { ...s.btnGhost, ...s.btnGhostActive } : s.btnGhost}>
             Stats
           </button>
+          <button onClick={() => { setShowExports((v) => !v); void refreshExports(); }} style={showExports ? { ...s.btnGhost, ...s.btnGhostActive } : s.btnGhost}>
+            Saved exports
+          </button>
           <button onClick={() => void saveFileSnapshot()} style={s.btnGhost}>Save file</button>
           <button onClick={() => void exportV1Jsonl()} style={s.btnGhost}>Export train (edited)</button>
         </div>
@@ -342,25 +468,116 @@ export default function AdminTrainingReviewPage() {
         </div>
       )}
 
-      <div style={s.filterBar}>
-        <div style={s.row}>
-          {[...STATUSES, "all"].map((key) => (
-            <button
-              key={key}
-              onClick={() => {
-                setStatusFilter(key);
-                setCurrentIndex(0);
-              }}
-              style={statusFilter === key ? { ...s.tab, ...s.tabActive } : s.tab}
-            >
-              {key}
-            </button>
-          ))}
+      {showExports && (
+        <div style={s.panel}>
+          <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 8 }}>Latest exports (backend/data)</div>
+          {exportsList.length === 0 ? (
+            <div style={{ color: "#64748b", fontSize: 13 }}>No export files found.</div>
+          ) : (
+            <div style={{ display: "grid", gap: 6 }}>
+              {exportsList.map((it) => (
+                <div key={`${it.name}-${it.updated_at}`} style={{ ...s.fieldBox, fontSize: 12 }}>
+                  {it.name} · {Math.round((it.size_bytes || 0) / 1024)} KB · {it.updated_at}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-        <div style={s.searchGroup}>
-          <input type="text" inputMode="numeric" value={idQuery} onChange={(e) => { setIdQuery(e.target.value); setCurrentIndex(0); }} placeholder="Search ID..." style={s.searchInputSmall} />
-          <input type="text" value={search} onChange={(e) => { setSearch(e.target.value); setCurrentIndex(0); }} placeholder="Search text..." style={s.searchInput} />
+      )}
+
+      <div style={{ marginBottom: 10 }}>
+        <div style={s.filterBar}>
+          <div style={s.row}>
+            {[...STATUSES, "all"].map((key) => (
+              <button
+                key={key}
+                onClick={() => {
+                  setStatusFilter(key);
+                  setCurrentIndex(0);
+                }}
+                style={statusFilter === key ? { ...s.tab, ...s.tabActive } : s.tab}
+              >
+                {key}
+              </button>
+            ))}
+          </div>
+          <div style={s.searchGroup}>
+            <input type="text" inputMode="numeric" value={idQuery} onChange={(e) => { setIdQuery(e.target.value); setCurrentIndex(0); }} placeholder="Search ID..." style={s.searchInputSmall} />
+            <input type="text" value={search} onChange={(e) => { setSearch(e.target.value); setCurrentIndex(0); }} placeholder="Search text..." style={s.searchInput} />
+          </div>
         </div>
+        <div style={{ marginTop: 8 }}>
+          <button
+            type="button"
+            onClick={() => setBulkOpen((v) => !v)}
+            style={bulkOpen ? { ...s.btnGhost, ...s.btnGhostActive } : s.btnGhost}
+          >
+            {bulkOpen ? "Hide bulk by ID" : "Bulk by ID"}
+          </button>
+        </div>
+        {bulkOpen && (
+          <div style={{ ...s.panel, marginTop: 10 }}>
+            <div style={s.sectionLabel}>Bulk update by ID (status, notes, reasoning)</div>
+            <p style={{ color: "#64748b", fontSize: 12, margin: "0 0 12px" }}>
+              Paste IDs (comma, space, or newline). Choose at least one of: <strong style={{ color: "#94a3b8" }}>Status</strong>, Human
+              notes, or Reasoning. If you change only notes/reasoning, status becomes <strong style={{ color: "#94a3b8" }}>edited</strong>.
+              Max 500 IDs per request.
+            </p>
+            <label style={s.editLabel}>IDs</label>
+            <textarea
+              value={bulkIdsRaw}
+              onChange={(e) => setBulkIdsRaw(e.target.value)}
+              rows={4}
+              style={s.textarea}
+              placeholder="e.g. 430, 418, 405"
+              disabled={bulkBusy}
+            />
+            <div style={{ marginTop: 12 }}>
+              <label style={s.editLabel}>Status (optional)</label>
+              <select
+                value={bulkCorrectionType}
+                onChange={(e) => setBulkCorrectionType((e.target.value || "") as (typeof STATUSES)[number] | "")}
+                style={s.select}
+                disabled={bulkBusy}
+              >
+                <option value="">No change (notes/reasoning only still force edited)</option>
+                {STATUSES.map((st) => (
+                  <option key={st} value={st}>
+                    {st}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <label style={s.editLabel}>Human notes (optional if Reasoning set)</label>
+              <textarea
+                value={bulkHumanNotes}
+                onChange={(e) => setBulkHumanNotes(e.target.value)}
+                rows={3}
+                style={s.textarea}
+                disabled={bulkBusy}
+              />
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <label style={s.editLabel}>Reasoning (optional if Human notes set)</label>
+              <textarea
+                value={bulkReasoning}
+                onChange={(e) => setBulkReasoning(e.target.value)}
+                rows={3}
+                style={s.textarea}
+                disabled={bulkBusy}
+              />
+            </div>
+            <div style={{ ...s.actions, padding: "12px 0 0", marginTop: 8 }}>
+              <button type="button" onClick={() => void runBulkPreview()} disabled={bulkBusy} style={s.btnGhost}>
+                Preview
+              </button>
+              <button type="button" onClick={() => void runBulkApply()} disabled={bulkBusy} style={s.btnPrimary}>
+                Apply
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div style={s.navBar}>
@@ -378,6 +595,11 @@ export default function AdminTrainingReviewPage() {
 
       {currentEntry && !editMode && (
         <div style={s.card}>
+          <div style={{ ...s.actions, marginBottom: 4, justifyContent: "flex-end", paddingTop: 0 }}>
+            <button onClick={startEdit} style={s.btnEdit}>
+              Edit (E)
+            </button>
+          </div>
           <Section label="Tenant message">
             <div style={s.tenantMsg}>{currentEntry.input_text}</div>
           </Section>
@@ -397,15 +619,16 @@ export default function AdminTrainingReviewPage() {
             <Field label="Human notes" value={currentEntry.human_notes || "-"} italic />
             <Field label="Reasoning" value={currentEntry.reasoning || "-"} italic />
           </Section>
-
-          <div style={s.actions}>
-            <button onClick={startEdit} style={s.btnEdit}>Edit (E)</button>
-          </div>
         </div>
       )}
 
       {editMode && editedEntry && (
         <div style={s.card}>
+          <div style={{ ...s.actions, marginBottom: 4, justifyContent: "flex-end", paddingTop: 0 }}>
+            <button onClick={() => void saveEdit()} disabled={saving} style={s.btnPrimary}>
+              Save changes
+            </button>
+          </div>
           <Section label="Tenant message">
             <div style={s.tenantMsg}>{editedEntry.input_text}</div>
           </Section>
@@ -459,8 +682,12 @@ export default function AdminTrainingReviewPage() {
           </Section>
 
           <div style={s.actions}>
-            <button onClick={() => void saveEdit()} style={s.btnPrimary}>Save changes</button>
-            <button onClick={cancelEdit} style={s.btnGhost}>Cancel</button>
+            <button onClick={() => void saveEdit()} disabled={saving} style={s.btnPrimary}>
+              Save changes
+            </button>
+            <button onClick={cancelEdit} disabled={saving} style={s.btnGhost}>
+              Cancel
+            </button>
           </div>
         </div>
       )}

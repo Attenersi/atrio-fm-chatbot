@@ -10,6 +10,10 @@
 | Managers / admins | [`README_managers.md`](README_managers.md) | [`README_managers.nl.md`](README_managers.nl.md) |
 | Developers | [`README_developers.md`](README_developers.md) | [`README_developers.nl.md`](README_developers.nl.md) |
 
+## Product and capabilities
+
+- [`features.md`](features.md) — canonical feature inventory (user + admin capabilities)
+
 ## Architecture and data
 
 - [`architecture.md`](architecture.md) — system context and chat request flow (Mermaid)

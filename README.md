@@ -2,21 +2,36 @@
 
 Language: **English** | [Nederlands](README.nl.md)
 
-FM Chatbot is a Facility Management assistant platform with:
+FM Chatbot is an AI assistant for Facility Management teams. It helps users get fast, policy-aligned answers from internal building and operations documentation while keeping support workflows connected to tickets and review.
 
-- Next.js frontend (`frontend/`)
-- FastAPI backend (`backend/`)
-- SQLite operational data store (users, sessions, tickets, gaps, training rows)
-- Chroma vector index for retrieval (RAG)
-- OpenAI-compatible LLM provider integration
+It combines a Next.js frontend, FastAPI backend, RAG retrieval over FM docs, and admin quality tooling so teams can improve answers over time instead of treating chatbot behavior as static.
 
-## What the app does
+## Who it is for
 
-The assistant answers FM questions using RAG, applies guardrails, may open tickets, and logs interactions for review. **End-to-end flow (diagrams)** lives in one place: [`docs/architecture.md`](docs/architecture.md).
+- FM operations teams handling daily building questions
+- Helpdesk and support staff triaging user requests
+- Admins and domain experts maintaining documentation, quality, and guardrails
+
+## Benefits
+
+- Faster first responses to common FM questions
+- More consistent answers grounded in your own documents
+- Reduced repetitive ticket load through better self-service
+- Better operational visibility with logs, reviews, and quality workflows
+
+## Core features
+
+- Grounded Q&A over FM documents using retrieval-augmented generation (RAG)
+- Guardrails for prompt injection and sensitive output patterns
+- Ticket-aware workflows (chat interactions can open and track support tickets)
+- Admin console for documents, users, gaps, training review, and quality controls
+- LLM profile management for provider/model defaults and diagnostics
+- Full role-based feature inventory: [`docs/features.md`](docs/features.md)
 
 ## Documentation
 
 **Canonical index** (all guides, technical docs, validation, and governance): [`docs/documentation_map.md`](docs/documentation_map.md)
+**End-to-end flow (diagrams):** [`docs/architecture.md`](docs/architecture.md)
 
 ## Quick start (Docker-only)
 
@@ -64,6 +79,14 @@ docker compose logs -f frontend
 - `/admin` - docs, users, knowledge gaps, training review, quality tools
 - `/admin/training-quality` - eval runs, analyzer suggestions, prompt overrides
 - `/admin/llm` - LLM profile management and task defaults
+
+## Platform components
+
+- Next.js frontend (`frontend/`)
+- FastAPI backend (`backend/`)
+- SQLite operational data store (users, sessions, tickets, gaps, training rows)
+- Chroma vector index for retrieval
+- OpenAI-compatible LLM provider integration
 
 ## Quality and testing
 

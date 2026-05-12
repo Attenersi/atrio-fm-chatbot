@@ -2,21 +2,35 @@
 
 Taal: [English](README.md) | **Nederlands**
 
-FM Chatbot is een Facility Management-assistentplatform met:
+FM Chatbot is een AI-assistent voor Facility Management-teams. De app helpt gebruikers snel en consistent antwoord te krijgen op basis van interne gebouw- en operationele documentatie, met koppeling naar ticketprocessen en review.
 
-- Next.js frontend (`frontend/`)
-- FastAPI backend (`backend/`)
-- SQLite voor operationele data (gebruikers, sessies, tickets, lacunes, trainingsregels)
-- Chroma vectorindex voor retrieval (RAG)
-- OpenAI-compatibele LLM-providerintegratie
+Het platform combineert een Next.js-frontend, FastAPI-backend, RAG-retrieval over FM-documenten en admin-kwaliteitstools, zodat teams antwoorden continu kunnen verbeteren in plaats van statisch te houden.
 
-## Wat de app doet
+## Voor wie is dit bedoeld
 
-De assistent beantwoordt FM-vragen met RAG, past guardrails toe, kan tickets openen en logt interacties voor review. **Volledige request flow (diagrammen, EN)** staat centraal in [`docs/architecture.md`](docs/architecture.md).
+- FM-operatieteams die dagelijkse gebouwvragen afhandelen
+- Helpdesk- en supportmedewerkers die verzoeken triëren
+- Admins en domeinexperts die documentatie, kwaliteit en guardrails beheren
+
+## Voordelen
+
+- Snellere eerste reactie op veelvoorkomende FM-vragen
+- Consistentere antwoorden, gebaseerd op eigen documentatie
+- Minder repetitieve tickets door betere self-service
+- Meer operationeel inzicht via logs, reviews en kwaliteitsworkflows
+
+## Kernfunctionaliteiten
+
+- Gegronde Q&A over FM-documenten met retrieval-augmented generation (RAG)
+- Guardrails tegen prompt-injection en gevoelige outputpatronen
+- Ticketgerichte workflow (chatinteracties kunnen supporttickets openen en volgen)
+- Adminconsole voor documenten, gebruikers, kennislacunes, trainingsreview en kwaliteitscontrole
+- LLM-profielbeheer voor provider/model-standaarden en diagnostiek
 
 ## Documentatie
 
 **Canonieke index** (alle gidsen, technische docs, validatie en governance; voornamelijk EN): [`docs/documentation_map.md`](docs/documentation_map.md)
+**Volledige request flow (diagrammen, EN):** [`docs/architecture.md`](docs/architecture.md)
 
 ## Snelle start (alleen Docker)
 
@@ -61,9 +75,17 @@ docker compose logs -f frontend
 - `/chat` - gesprekken en automatische ticketaanmaak
 - `/dashboard` - ticketlijst, statistieken, filters en statussen
 - `/help` - in-app handleiding
-- `/admin` - documenten, users, kennislacunes, training review
-- `/admin/training-quality` - eval runs, analyzer, prompt overrides
-- `/admin/llm` - LLM-profielen en task defaults
+- `/admin` - documenten, gebruikers, kennislacunes, trainingsreview
+- `/admin/training-quality` - evaluatieruns, analyzer-suggesties, prompt-overrides
+- `/admin/llm` - LLM-profielen en taakstandaarden
+
+## Platformcomponenten
+
+- Next.js frontend (`frontend/`)
+- FastAPI backend (`backend/`)
+- SQLite voor operationele data (gebruikers, sessies, tickets, lacunes, trainingsregels)
+- Chroma vectorindex voor retrieval
+- OpenAI-compatibele LLM-providerintegratie
 
 ## Kwaliteit en testen
 

@@ -7,7 +7,14 @@ from pathlib import Path
 import chromadb
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from .config import CHROMA_DIR, DOCS_DIR
+from .config import (
+    CHROMA_DIR,
+    DOCS_DIR,
+    DOCS_SANITIZE_INSTRUCTION_LIKE,
+    INGEST_CHUNK_OVERLAP,
+    INGEST_CHUNK_SIZE,
+)
+from .doc_sanitize import sanitize_document_text
 from .llm import embed
 
 
@@ -39,7 +46,10 @@ def _load_docs(docs_dir: Path) -> list[dict[str, str]]:
     for path in docs_dir.glob("*"):
         if path.suffix.lower() not in {".md", ".txt"}:
             continue
-        text = path.read_text(encoding="utf-8")
+        text = sanitize_document_text(
+            path.read_text(encoding="utf-8"),
+            enabled=DOCS_SANITIZE_INSTRUCTION_LIKE,
+        )
         docs.append(
             {
                 "source": path.name,
@@ -50,15 +60,22 @@ def _load_docs(docs_dir: Path) -> list[dict[str, str]]:
     return docs
 
 
-def run_ingest() -> int:
+def run_ingest(
+    *,
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
+) -> int:
     docs_dir = Path(DOCS_DIR)
     chroma_dir = Path(CHROMA_DIR)
     chroma_dir.mkdir(parents=True, exist_ok=True)
 
+    cs = int(INGEST_CHUNK_SIZE if chunk_size is None else chunk_size)
+    co = int(INGEST_CHUNK_OVERLAP if chunk_overlap is None else chunk_overlap)
+
     raw_docs = _load_docs(docs_dir)
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1200,
-        chunk_overlap=150,
+        chunk_size=cs,
+        chunk_overlap=co,
         separators=["\n## ", "\n### ", "\n\n", "\n", ". ", " "],
     )
 

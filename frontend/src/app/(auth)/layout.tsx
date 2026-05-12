@@ -2,7 +2,11 @@ import Image from "next/image";
 import Link from "next/link";
 import { ThemeToggle } from "../../components/ThemeToggle";
 
-export default function AuthGroupLayout({ children }: { children: React.ReactNode }) {
+export default function AuthGroupLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
     <div className="auth-shell">
       <ThemeToggle />

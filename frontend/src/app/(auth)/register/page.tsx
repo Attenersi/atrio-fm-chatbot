@@ -54,10 +54,25 @@ export default function RegisterPage() {
         <h1 style={{ textAlign: "center", marginBottom: 0 }}>Create account</h1>
         <form onSubmit={onSubmit} className="panel-grid">
           <label htmlFor="reg-username">Username</label>
-          <input id="reg-username" className="field" value={username} onChange={(e) => setUsername(e.target.value)} />
+          <input
+            id="reg-username"
+            className="field"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+          />
           <label htmlFor="reg-password">Password</label>
-          <input id="reg-password" type="password" className="field" value={password} onChange={(e) => setPassword(e.target.value)} />
-          {message ? <p style={{ margin: 0, color: "var(--color-action-danger)" }}>{message}</p> : null}
+          <input
+            id="reg-password"
+            type="password"
+            className="field"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          {message ? (
+            <p style={{ margin: 0, color: "var(--color-action-danger)" }}>
+              {message}
+            </p>
+          ) : null}
           <button type="submit" disabled={busy}>
             {busy ? "Please wait..." : "Create account"}
           </button>

@@ -1,0 +1,10 @@
+# Prefer reproducible installs (matches CI):
+#   cd backend && uv sync --group dev
+# See ../docs/README_developers.md
+#
+# Pip-only fallback after installing runtime deps:
+-r requirements.txt
+ruff>=0.8.0
+mypy>=1.13.0
+pytest>=8.3.0
+pip-audit>=2.7.0

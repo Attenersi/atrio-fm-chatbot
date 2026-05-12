@@ -1,0 +1,17 @@
+target-version = "py311"
+line-length = 100
+# `app/` is large and legacy; lint tests, scripts, and repo-root Python utilities first.
+# Tighten coverage incrementally (see docs/ci.md).
+src = ["tests", "scripts"]
+
+exclude = [
+    "app",
+    ".venv",
+    "venv",
+    "alembic",
+]
+
+[lint]
+# Keep CI green while tightening: pyflakes only outside `app/` (see src/exclude above).
+select = ["F"]
+ignore = []

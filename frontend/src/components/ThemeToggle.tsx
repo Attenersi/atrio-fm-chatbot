@@ -1,11 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useI18n } from "../i18n/I18nProvider";
 
 export const THEME_KEY = "fm_theme";
 type Theme = "light" | "dark";
 
 export function ThemeToggle() {
+  const { t } = useI18n();
   const [theme, setTheme] = useState<Theme>("light");
 
   useEffect(() => {
@@ -23,8 +25,14 @@ export function ThemeToggle() {
   }
 
   return (
-    <button type="button" className="theme-toggle-fixed" onClick={toggleTheme} aria-label="Toggle color theme">
-      Theme: {theme === "light" ? "Light" : "Dark"}
+    <button
+      type="button"
+      className="chrome-toggle-btn"
+      onClick={toggleTheme}
+      aria-label={t("theme.toggleAria")}
+    >
+      {t("theme.label")}:{" "}
+      {theme === "light" ? t("theme.light") : t("theme.dark")}
     </button>
   );
 }

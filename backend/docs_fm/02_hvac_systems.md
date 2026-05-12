@@ -2,7 +2,7 @@
 
 ## System Overview
 
-Meridian Business Center uses a central HVAC system managed by a Siemens Desigo CC building management system. The system includes:
+Meridian Business Center uses a central HVAC system managed by a managed by a central building management system (BMS). The system includes:
 
 - Central air handling units (AHUs) on floors 0, 2, and 4 (mechanical closets)
 - Variable Refrigerant Flow (VRF) heat pump units for individual zone control

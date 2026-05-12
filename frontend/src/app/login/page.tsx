@@ -9,7 +9,9 @@ export default function LoginPage() {
 
   useEffect(() => {
     getSession()
-      .then((res) => router.replace(res.user.role === "admin" ? "/admin" : "/chat"))
+      .then((res) =>
+        router.replace(res.user.role === "admin" ? "/admin" : "/chat")
+      )
       .catch(() => router.replace("/"));
   }, [router]);
 

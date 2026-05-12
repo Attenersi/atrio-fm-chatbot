@@ -1,0 +1,36 @@
+[project]
+name = "fm-chatbot-backend"
+version = "0.1.0"
+description = "FM Chatbot FastAPI backend"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "python-dotenv",
+    "python-multipart",
+    "openai",
+    "slowapi",
+    "langchain",
+    "langchain-community",
+    "langchain-text-splitters",
+    "chromadb",
+    "pypdf",
+    "python-docx",
+    "tiktoken",
+    "json5",
+    "json-repair",
+    "cryptography",
+    "alembic",
+    "pydantic",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "pytest>=8.3.0",
+    "pip-audit>=2.7.0",
+]
+
+[tool.uv]
+package = false

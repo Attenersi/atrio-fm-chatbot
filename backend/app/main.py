@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import uuid
+from contextlib import asynccontextmanager
 import threading
 import time
 from datetime import datetime, timezone
@@ -14,33 +17,60 @@ from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Query, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from openai import APIStatusError
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.requests import Request
 
+from .chat_injection_guard import (
+    llm_classify_injection,
+    regex_hits_injection,
+    synthetic_injection_blocked_payload,
+)
+from .chat_output_guard import apply_output_guardrails
 from .classifier import fallback_response, parse_llm_json
 from .config import (
+    ALLOW_INLINE_LLM_KEYS,
     ANALYZER_CACHE_TTL_HOURS,
+    ANALYZER_DEADLINE_SECONDS,
+    ANALYZER_DISCARD_FILTER_DB_LIMIT,
+    ANALYZER_DISCARD_PROMPT_LIMIT,
+    ANALYZER_LLM_TIMEOUT_SECONDS,
+    ANALYZER_MAX_LLM_ATTEMPTS,
+    ANALYZER_REPAIR_BUDGET_SECONDS,
     AUTH_COOKIE_SAMESITE,
     AUTH_COOKIE_SECURE,
     AUTH_SESSION_COOKIE,
     AUTH_SESSION_TTL_HOURS,
+    CACHE_SWEEP_INTERVAL_SECONDS,
+    CHROMA_DIR,
+    CHAT_INJECTION_LLM_FILTER,
     CORS_ALLOW_ORIGIN_REGEX,
     DOCS_DIR,
+    DOCS_SANITIZE_INSTRUCTION_LIKE,
+    EMBED_MODEL,
     EVAL_BASELINE_MAX_AGE_HOURS,
+    EVENT_LOG_KEEP_PER_KIND,
+    INGEST_CHUNK_OVERLAP,
+    INGEST_CHUNK_SIZE,
+    LLM_API_KEY,
+    LLM_BASE_URL,
+    LLM_EMBED_API_KEY,
+    LLM_HEALTH_TIMEOUT_SECONDS,
     LLM_MODEL,
     MAX_ACTIVE_OVERRIDES,
-    NVIDIA_API_KEY,
     OVERRIDE_MIN_CONFIDENCE,
-    RAG_TOP_K,
     RATE_LIMIT_CHAT,
     RATE_LIMIT_EMBED,
+    REPLAY_MAX_LLM_CALLS,
+    MULTI_TICKET_PER_MESSAGE_ENABLED,
     TRAINING_DATA_AUTO_REFRESH,
     TRAINING_DATA_AUTO_REFRESH_SECONDS,
     TRAINING_DATA_DIR,
 )
 from .doc_extract import UPLOAD_ALLOWED_EXTENSIONS, extract_text_from_upload
+from .doc_sanitize import sanitize_document_text
 from . import mail as mail_notify
 from .database import (
     apply_classification_override,
@@ -67,23 +97,43 @@ from .database import (
     list_users,
     cleanup_training_examples_and_candidates,
     compute_pending_cache_key,
+    compute_review_signals_cache_key,
+    covered_example_ids_from_active_overrides,
+    consolidate_active_prompt_overrides,
     count_active_prompt_overrides,
-    create_eval_run,
-    finalize_eval_run,
+    create_llm_model_profile,
+    delete_meta,
+    delete_llm_model_profile,
+    get_llm_model_profile,
+    get_llm_task_default_profile_id,
+    list_llm_model_profiles,
+    list_llm_task_defaults,
+    list_question_bank_rows,
+    question_bank_dedup_cache_tag,
+    record_suggestion_affected_from_analysis_payload,
+    set_llm_task_default,
+    update_llm_model_profile,
     get_eval_run,
     get_prompt_analysis_cache,
     get_prompt_override,
-    has_running_eval_run,
-    latest_done_eval_run,
+    get_rag_system_prompt_head_override,
     list_eval_runs,
     list_pending_grouped,
     list_prompt_overrides,
+    list_recent_suggestion_decisions,
+    list_review_signals_for_analysis,
     mass_mark_all_edited_if_any_custom_reasoning,
+    get_active_prompt_overrides,
     apply_prompt_override as db_apply_prompt_override,
     rollback_prompt_override as db_rollback_prompt_override,
-    set_prompt_override_eval_after,
+    list_prompt_override_audit,
+    record_prompt_override_audit,
+    record_prompt_suggestion_decision,
+    set_prompt_override_replay_summary,
     prune_training_examples_for_review_policy,
     put_prompt_analysis_cache,
+    suppress_review_signals,
+    vacuum_training_quality_caches,
     append_chat_exchange,
     start_new_chat_thread,
     ticket_stats,
@@ -91,6 +141,9 @@ from .database import (
     update_ticket_status,
     update_training_example_review,
     update_user_admin_fields,
+    erase_user_chat_and_training_data,
+    ALLOWED_CORRECTION_TYPES,
+    TRAINING_EXPORT_MAX_IDS,
     export_training_examples_jsonl,
     backfill_training_examples_from_tickets,
     backfill_training_examples_from_test_results,
@@ -99,15 +152,145 @@ from .database import (
     export_v1_jsonl,
     export_v1_review_csv,
     rebuild_json_store_from_db,
+    set_meta,
+    set_rag_system_prompt_head_override,
     write_v1_dataset_files,
 )
 from .ingest import run_ingest
-from .eval_runner import EvalSummary, load_golden, run_eval
-from .llm import chat_with_health_timeout, embed
-from .rag import agenerate, agenerate_stream, retrieve_with_sources
+from .llm import achat, chat_with_health_timeout, embed
+from .llm_profiles import resolve_llm_profile_for_task
+from .rag import (
+    RAG_TOP_K_META_KEY,
+    agenerate,
+    agenerate_stream,
+    effective_rag_top_k,
+    get_effective_system_prompt_head,
+    rag_top_k_admin_detail,
+    retrieve_with_sources,
+)
+from .prompt_rule_similarity import (
+    filter_discarded_suggestions,
+    filter_duplicate_suggestions,
+    find_duplicate_rule,
+)
+from .training_quality_analysis_enrich import (
+    enrich_analysis_payload_with_supporting_examples,
+    enrich_prompt_override_rows,
+)
+from .request_context import (
+    REQUEST_ID_HEADER,
+    add_request_id_filters,
+    normalize_request_id,
+    request_id_var,
+)
+from . import rag_eval
 
 
 _obs_log = logging.getLogger("fm.observability")
+_tq_log = logging.getLogger("fm.training_quality")
+add_request_id_filters("fm.observability", "fm.training_quality")
+
+
+def _prompt_rule_fingerprint(system_prompt: str, active_overrides: list[dict]) -> str:
+    import hashlib
+
+    override_blob = "\n".join(
+        str(o.get("approved_change", "") or "").strip() for o in active_overrides
+    )
+    blob = f"{system_prompt}\n---ACTIVE_OVERRIDES---\n{override_blob}"
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _base_system_prompt_template_fingerprint(template: str) -> str:
+    """Hash of the system prompt template before ``.format`` (no user context)."""
+    import hashlib
+
+    return hashlib.sha256((template or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _normalize_hidden_entry(
+    raw: dict[str, Any], reason: str, kind: str = "group"
+) -> dict[str, Any]:
+    """Lift one filter result into the unified ``hidden_suggestions`` shape."""
+    return {
+        "kind": str(raw.get("kind") or kind),
+        "type": str(raw.get("type") or ""),
+        "reason": reason,
+        "suggested_change": str(raw.get("suggested_change") or "")[:600],
+        "matched_text": str(
+            raw.get("discarded_suggestion")
+            or raw.get("matched_text")
+            or raw.get("description")
+            or ""
+        )[:600],
+        "match_type": str(raw.get("match_type") or ""),
+        "score": raw.get("score"),
+        "source": raw.get("source"),
+        "affected_ids": [
+            int(x) for x in (raw.get("affected_ids") or []) if isinstance(x, int)
+        ],
+        "decision_id": raw.get("decision_id"),
+    }
+
+
+def _finalize_analysis_response(
+    payload: dict[str, Any],
+    system_prompt: str,
+    active_overrides: list[dict],
+    discard_decisions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply all hidden-suggestion filters and collapse them into one list.
+
+    The legacy ``duplicate_matches`` / ``discarded_matches`` /
+    ``question_claim_matches`` arrays are gone; the frontend reads a single
+    ``hidden_suggestions`` array with ``reason`` / ``kind`` markers. The
+    integer counters (``duplicate_suggestions_hidden`` etc.) stay so the
+    dashboard headline still works.
+    """
+    from .database import get_question_bank_claimed_example_ids
+    from .question_bank import filter_payload_by_claimed_examples
+
+    hidden_suggestions: list[dict[str, Any]] = []
+
+    claimed = get_question_bank_claimed_example_ids(active_overrides)
+    after_qb = filter_payload_by_claimed_examples(payload, claimed)
+    for raw in after_qb.get("question_claim_matches") or []:
+        hidden_suggestions.append(
+            _normalize_hidden_entry(
+                raw,
+                reason="question_bank_claimed",
+                kind=str(raw.get("kind") or "group"),
+            )
+        )
+
+    groups_after_qb = after_qb.get("groups") if isinstance(after_qb, dict) else []
+    if not isinstance(groups_after_qb, list):
+        groups_after_qb = []
+    visible_groups, dup_hidden = filter_duplicate_suggestions(
+        groups_after_qb, system_prompt, active_overrides
+    )
+    for raw in dup_hidden:
+        hidden_suggestions.append(
+            _normalize_hidden_entry(raw, reason="duplicate_rule")
+        )
+
+    visible_groups, discarded_hidden = filter_discarded_suggestions(
+        visible_groups, discard_decisions
+    )
+    for raw in discarded_hidden:
+        hidden_suggestions.append(
+            _normalize_hidden_entry(raw, reason="reviewer_discarded")
+        )
+
+    return {
+        **payload,
+        "groups": visible_groups,
+        "rag_suggestions": after_qb.get("rag_suggestions") or [],
+        "duplicate_suggestions_hidden": len(dup_hidden),
+        "discarded_suggestions_hidden": len(discarded_hidden),
+        "question_claim_hidden": int(after_qb.get("question_claim_hidden") or 0),
+        "hidden_suggestions": hidden_suggestions,
+    }
 
 
 def _rate_limit_key(request: Request) -> str:
@@ -124,12 +307,95 @@ def _rate_limit_key(request: Request) -> str:
     return get_remote_address(request)
 
 
+_DATASET_REFRESH_THREAD_STARTED = False
+_TQ_CACHE_SWEEP_TASK: asyncio.Task | None = None
+
+
+def _should_enable_training_auto_refresh() -> bool:
+    return str(TRAINING_DATA_AUTO_REFRESH).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _start_training_dataset_scheduler() -> None:
+    global _DATASET_REFRESH_THREAD_STARTED
+    if _DATASET_REFRESH_THREAD_STARTED:
+        return
+    if not _should_enable_training_auto_refresh():
+        return
+    interval = max(15, int(TRAINING_DATA_AUTO_REFRESH_SECONDS or 60))
+
+    def _runner() -> None:
+        while True:
+            try:
+                write_v1_dataset_files(TRAINING_DATA_DIR)
+            except Exception:
+                _obs_log.exception("write_v1_dataset_files failed in background runner")
+            time.sleep(interval)
+
+    th = threading.Thread(target=_runner, name="training-dataset-refresh", daemon=True)
+    th.start()
+    _DATASET_REFRESH_THREAD_STARTED = True
+
+
+def _start_training_quality_cache_sweep() -> None:
+    """Periodically prune analyzer cache + event log so SQLite does not bloat.
+
+    Runs on the FastAPI event loop. Best-effort: any failure is logged and the
+    next tick still fires.
+    """
+    global _TQ_CACHE_SWEEP_TASK
+    if _TQ_CACHE_SWEEP_TASK is not None and not _TQ_CACHE_SWEEP_TASK.done():
+        return
+
+    async def _loop() -> None:
+        while True:
+            try:
+                stats = await asyncio.to_thread(
+                    vacuum_training_quality_caches,
+                    ttl_hours=ANALYZER_CACHE_TTL_HOURS,
+                    keep_per_kind=EVENT_LOG_KEEP_PER_KIND,
+                )
+                if stats.get("deleted_cache_rows") or stats.get("deleted_event_rows"):
+                    _tq_log.info(
+                        "training-quality cache sweep deleted_cache=%d deleted_events=%d",
+                        stats.get("deleted_cache_rows", 0),
+                        stats.get("deleted_event_rows", 0),
+                    )
+            except Exception:
+                _obs_log.exception("training-quality cache sweep failed")
+            await asyncio.sleep(max(60, int(CACHE_SWEEP_INTERVAL_SECONDS)))
+
+    try:
+        loop = asyncio.get_running_loop()
+        _TQ_CACHE_SWEEP_TASK = loop.create_task(_loop())
+    except RuntimeError:
+        # No running loop (should not happen during ASGI lifespan startup).
+        _TQ_CACHE_SWEEP_TASK = None
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    init_db()
+    _start_training_dataset_scheduler()
+    _start_training_quality_cache_sweep()
+    yield
+    global _TQ_CACHE_SWEEP_TASK
+    task = _TQ_CACHE_SWEEP_TASK
+    _TQ_CACHE_SWEEP_TASK = None
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            _obs_log.exception("training-quality cache sweep task shutdown")
+
+
 limiter = Limiter(key_func=_rate_limit_key)
 
-app = FastAPI(title="FM Chatbot Backend")
+app = FastAPI(title="FM Chatbot Backend", lifespan=_lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-_DATASET_REFRESH_THREAD_STARTED = False
 
 app.add_middleware(
     CORSMiddleware,
@@ -139,6 +405,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _request_id_middleware(request: Request, call_next):
+    incoming = request.headers.get(REQUEST_ID_HEADER)
+    rid = normalize_request_id(incoming)
+    token = request_id_var.set(rid)
+    try:
+        response = await call_next(request)
+        response.headers[REQUEST_ID_HEADER] = rid
+        return response
+    finally:
+        request_id_var.reset(token)
 
 
 class ChatRequest(BaseModel):
@@ -151,6 +430,68 @@ class ChatRequest(BaseModel):
     source_type: str = ""
     source_id: str = ""
     source_ref: str = ""
+
+
+async def chat_request_with_merged_history(
+    req: ChatRequest, user: dict, *, isolate_history: bool
+) -> ChatRequest:
+    """Return a copy of `req` with `history` filled. When isolate_history is True,
+    history is always empty so batch eval matches CLI test runs (no DB thread)."""
+    if isolate_history:
+        return req.model_copy(update={"history": []})
+    merged = await asyncio.to_thread(_history_from_active_chat, user, req.history)
+    return req.model_copy(update={"history": merged})
+
+
+async def run_chat_core(
+    req: ChatRequest, user: dict, *, isolate_history: bool = False
+) -> dict:
+    """Shared non-streaming chat pipeline (RAG + LLM + finalize). Used by /api/chat
+    and by admin RAG eval with isolate_history=True."""
+    chat_req = await chat_request_with_merged_history(
+        req, user, isolate_history=isolate_history
+    )
+    resolved = resolve_llm_profile_for_task("chat")
+    context: list[str] = []
+    sources: list[str] = []
+    payload: dict
+
+    if regex_hits_injection(chat_req.message):
+        payload = synthetic_injection_blocked_payload("regex")
+    elif CHAT_INJECTION_LLM_FILTER:
+        inj = await llm_classify_injection(chat_req.message, resolved=resolved)
+        if inj == "INJECTION":
+            payload = synthetic_injection_blocked_payload("llm")
+        else:
+            context, sources = await asyncio.to_thread(
+                retrieve_with_sources, chat_req.message, effective_rag_top_k()
+            )
+            raw_response = await agenerate(
+                chat_req.message, context, chat_req.history, resolved=resolved
+            )
+            try:
+                payload = parse_llm_json(raw_response)
+            except Exception:
+                payload = fallback_response(raw_response)
+            payload = apply_output_guardrails(payload, chat_req.message)
+            payload = _apply_fm_safety_net(payload, chat_req.message)
+    else:
+        context, sources = await asyncio.to_thread(
+            retrieve_with_sources, chat_req.message, effective_rag_top_k()
+        )
+        raw_response = await agenerate(
+            chat_req.message, context, chat_req.history, resolved=resolved
+        )
+        try:
+            payload = parse_llm_json(raw_response)
+        except Exception:
+            payload = fallback_response(raw_response)
+        payload = apply_output_guardrails(payload, chat_req.message)
+        payload = _apply_fm_safety_net(payload, chat_req.message)
+
+    return await asyncio.to_thread(
+        _finalize_chat_payload, chat_req, payload, context, sources, user
+    )
 
 
 class EmbedRequest(BaseModel):
@@ -180,6 +521,13 @@ class AdminDocUpdateRequest(BaseModel):
     content: str
 
 
+class AdminRagSettingsPatchRequest(BaseModel):
+    """``rag_top_k`` writes a SQLite meta override; ``clear_rag_top_k_override`` removes it."""
+
+    rag_top_k: int | None = None
+    clear_rag_top_k_override: bool = False
+
+
 class AuthLoginRequest(BaseModel):
     username: str
     password: str
@@ -196,6 +544,12 @@ class AdminUserUpdateRequest(BaseModel):
     email: str | None = None
 
 
+class AdminUserEraseChatTrainingRequest(BaseModel):
+    """Body must repeat the target user's exact ``username`` to confirm erasure."""
+
+    confirm_username: str
+
+
 class KnowledgeGapUpdateRequest(BaseModel):
     status: str
     notes: str | None = None
@@ -207,6 +561,8 @@ class KnowledgeGapResolveRequest(BaseModel):
     content: str
     mode: str = "append"  # append | overwrite
     auto_reindex: bool = True
+    chunk_size: int | None = None
+    chunk_overlap: int | None = None
 
 
 class AdminTrainingExampleUpdateRequest(BaseModel):
@@ -224,9 +580,33 @@ class AdminTrainingBulkReviewRequest(BaseModel):
     correction_type: str | None = None
 
 
+class AdminTrainingExamplesExportRequest(BaseModel):
+    """Body for POST /api/admin/training-examples/export (filtered NDJSON)."""
+
+    correction_types: list[str] = Field(
+        default_factory=lambda: ["pending", "approved", "edited", "rejected"]
+    )
+    ids: list[int] | None = None
+    id_min: int | None = None
+    id_max: int | None = None
+    created_after: str | None = None
+    created_before: str | None = None
+    include_actual_output: bool = False
+
+
 class AdminV1BuildRequest(BaseModel):
     test_results_path: str = "test_results_full.json"
     output_dir: str = "data"
+
+
+class AdminSystemPromptHeadPayload(BaseModel):
+    """Body for PUT ``/api/admin/training-quality/system-prompt-head``.
+
+    Empty or whitespace-only ``override_text`` removes the DB override and
+    restores the built-in template from code.
+    """
+
+    override_text: str = ""
 
 
 class ResolutionNoteCreateRequest(BaseModel):
@@ -272,20 +652,14 @@ FM_KEYWORDS = {
 }
 AUTO_TICKET_QUERY_TYPES = {"SERVICE_REQUEST", "INCIDENT"}
 ACTION_HINTS = {
-    "napraw",
     "fix",
     "repair",
     "check",
-    "sprawdz",
     "replace",
-    "wymien",
-    "interwenc",
     "service",
 }
 INCIDENT_HINTS = {
-    "awaria",
     "leak",
-    "wyciek",
     "alarm",
     "smell",
     "smells",
@@ -297,8 +671,6 @@ INCIDENT_HINTS = {
     "issue",
     "broken",
     "smoke",
-    "dym",
-    "brak",
     "outage",
     "emergency",
 }
@@ -374,10 +746,6 @@ ACK_HINTS = {
     "fixed",
     "resolved",
     "works",
-    "dziala",
-    "działa",
-    "dzieki",
-    "dzięki",
 }
 
 
@@ -411,31 +779,6 @@ def _backend_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _should_enable_training_auto_refresh() -> bool:
-    return str(TRAINING_DATA_AUTO_REFRESH).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _start_training_dataset_scheduler() -> None:
-    global _DATASET_REFRESH_THREAD_STARTED
-    if _DATASET_REFRESH_THREAD_STARTED:
-        return
-    if not _should_enable_training_auto_refresh():
-        return
-    interval = max(15, int(TRAINING_DATA_AUTO_REFRESH_SECONDS or 60))
-
-    def _runner() -> None:
-        while True:
-            try:
-                write_v1_dataset_files(TRAINING_DATA_DIR)
-            except Exception:
-                _obs_log.exception("write_v1_dataset_files failed in background runner")
-            time.sleep(interval)
-
-    th = threading.Thread(target=_runner, name="training-dataset-refresh", daemon=True)
-    th.start()
-    _DATASET_REFRESH_THREAD_STARTED = True
-
-
 def _auth_cookie_max_age_seconds() -> int:
     return max(1, AUTH_SESSION_TTL_HOURS) * 60 * 60
 
@@ -458,6 +801,309 @@ def _require_admin(user: dict = Depends(_require_auth)) -> dict:
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+def _resolved_ingest_chunk_params(
+    chunk_size: int | None,
+    chunk_overlap: int | None,
+) -> tuple[int, int]:
+    """Merge optional overrides with config defaults; validate bounds."""
+    cs = INGEST_CHUNK_SIZE if chunk_size is None else int(chunk_size)
+    co = INGEST_CHUNK_OVERLAP if chunk_overlap is None else int(chunk_overlap)
+    if cs < 200 or cs > 8000:
+        raise HTTPException(
+            status_code=422, detail="chunk_size must be between 200 and 8000"
+        )
+    if co < 0 or co >= cs:
+        raise HTTPException(
+            status_code=422,
+            detail="chunk_overlap must be >= 0 and less than chunk_size",
+        )
+    return cs, co
+
+
+def _first_env_var_with_value(*names: str) -> str | None:
+    """First name in ``names`` whose value is non-empty (never returns the secret)."""
+    for name in names:
+        raw = os.getenv(name)
+        if raw is not None and str(raw).strip():
+            return name
+    return None
+
+
+def _env_var_nonempty(name: str) -> bool:
+    raw = os.getenv(name)
+    return raw is not None and bool(str(raw).strip())
+
+
+def _fm_llm_diag_extra_env_key_names() -> list[str]:
+    """Optional comma-separated names to include in ``env_api_key_diag`` (presence only)."""
+    raw = os.getenv("FM_LLM_DIAG_EXTRA_ENV_KEYS", "")
+    if not raw.strip():
+        return []
+    out: list[str] = []
+    for part in raw.split(","):
+        n = part.strip()
+        if n and n not in out:
+            out.append(n)
+    return out
+
+
+def _effective_sync_embed_env_key_name() -> str | None:
+    """Mirror ``LLM_EMBED_API_KEY`` resolution: embed-specific vars, then chat key vars."""
+    k = _first_env_var_with_value("LLM_EMBED_API_KEY", "NVIDIA_EMBED_API_KEY")
+    if k:
+        return k
+    return _first_env_var_with_value("LLM_API_KEY", "NVIDIA_API_KEY")
+
+
+def _env_api_key_diag() -> dict[str, Any]:
+    """Which env vars are non-empty vs which names the app actually reads (no secret values)."""
+    standard = (
+        "LLM_API_KEY",
+        "NVIDIA_API_KEY",
+        "LLM_EMBED_API_KEY",
+        "NVIDIA_EMBED_API_KEY",
+    )
+    extras = _fm_llm_diag_extra_env_key_names()
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for n in (*standard, *extras):
+        if n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    chat_win = _first_env_var_with_value("LLM_API_KEY", "NVIDIA_API_KEY")
+    embed_sync_win = _effective_sync_embed_env_key_name()
+    return {
+        "chat_process_env_resolution_order": ["LLM_API_KEY", "NVIDIA_API_KEY"],
+        "chat_process_env_winning_name": chat_win,
+        "ingest_embed_sync_resolution_order": [
+            "LLM_EMBED_API_KEY",
+            "NVIDIA_EMBED_API_KEY",
+            "LLM_API_KEY",
+            "NVIDIA_API_KEY",
+        ],
+        "ingest_embed_sync_winning_name": embed_sync_win,
+        "candidates": [{"name": n, "non_empty": _env_var_nonempty(n)} for n in ordered],
+        "extra_names_from_FM_LLM_DIAG_EXTRA_ENV_KEYS": extras,
+        "note": (
+            "The app reads only the variables in each resolution_order (first non-empty wins). "
+            "NVIDIA_* are legacy aliases; config maps them to the same values as LLM_*. "
+            "Arbitrary names like MY_OTHER_LLM_API_KEY are never read unless you add them to "
+            "FM_LLM_DIAG_EXTRA_ENV_KEYS for this report, set them as an LLM profile Env alias, "
+            "or copy the key into LLM_API_KEY / LLM_EMBED_API_KEY in .env."
+        ),
+    }
+
+
+def _profile_api_key_mode(
+    prof: dict[str, Any] | None,
+) -> tuple[str, str | None]:
+    """(mode, env_var_name). ``env_var_name`` is set only for env_alias mode."""
+    if not prof:
+        return ("none", None)
+    alias = str(prof.get("env_alias") or "").strip()
+    if alias:
+        return ("env_alias", alias)
+    if prof.get("has_api_key"):
+        return ("stored", None)
+    return ("none", None)
+
+
+def _admin_ingest_pre_chunk_options() -> dict[str, Any]:
+    """Read-only ingest pipeline settings applied before / while splitting into chunks."""
+    return {
+        "docs_dir": DOCS_DIR,
+        "chroma_dir": CHROMA_DIR,
+        "sanitize_instruction_like": DOCS_SANITIZE_INSTRUCTION_LIKE,
+        "text_splitter_separators": ["\n## ", "\n### ", "\n\n", "\n", ". ", " "],
+        "chunk_metadata_keyword_limit": 12,
+        "chroma_collection": "fm_docs",
+        "embed_input_type_for_passages": "passage",
+    }
+
+
+def _admin_rag_settings_response() -> dict[str, Any]:
+    return {
+        "rag_top_k": rag_top_k_admin_detail(),
+        "ingest_pre_chunk": _admin_ingest_pre_chunk_options(),
+        "ingest_chunk_defaults": {
+            "chunk_size": INGEST_CHUNK_SIZE,
+            "chunk_overlap": INGEST_CHUNK_OVERLAP,
+        },
+    }
+
+
+def _admin_reindex_defaults_payload() -> dict[str, Any]:
+    rag = rag_top_k_admin_detail()
+    return {
+        "ingest_chunk_size": INGEST_CHUNK_SIZE,
+        "ingest_chunk_overlap": INGEST_CHUNK_OVERLAP,
+        "rag_top_k": rag["effective"],
+        "rag_top_k_env_startup_default": rag["env_startup_default"],
+        "rag_top_k_meta_override_active": rag["meta_override_active"],
+        "rag_top_k_limits": rag["limits"],
+        "limits": {
+            "chunk_size_min": 200,
+            "chunk_size_max": 8000,
+            "chunk_overlap_min": 0,
+        },
+        "ingest_pre_chunk": _admin_ingest_pre_chunk_options(),
+    }
+
+
+def _public_llm_runtime_snapshot() -> dict[str, Any]:
+    """Non-secret view of resolved LLM targets (chat/embed) + ingest embed + RAG defaults."""
+    chat_pid = get_llm_task_default_profile_id("chat")
+    chat_prof = get_llm_model_profile(chat_pid) if chat_pid else None
+    resolved_chat = resolve_llm_profile_for_task("chat")
+    embed_pid = get_llm_task_default_profile_id("embed")
+    embed_prof = get_llm_model_profile(embed_pid) if embed_pid else None
+    resolved_embed = resolve_llm_profile_for_task("embed")
+    chat_src_profile = bool(chat_pid and chat_prof)
+    embed_src_profile = bool(embed_pid and embed_prof)
+    chat_mode, chat_key_name = _profile_api_key_mode(chat_prof)
+    if not chat_src_profile:
+        chat_mode = "process_env"
+        chat_key_name = _first_env_var_with_value("LLM_API_KEY", "NVIDIA_API_KEY")
+    embed_mode, embed_key_name = _profile_api_key_mode(embed_prof)
+    if not embed_src_profile:
+        embed_mode = "process_env"
+        embed_key_name = _effective_sync_embed_env_key_name()
+    sync_embed_key = _effective_sync_embed_env_key_name()
+    _rag_k = rag_top_k_admin_detail()
+    return {
+        "rag_top_k": _rag_k["effective"],
+        "rag_top_k_settings": _rag_k,
+        "env_api_key_diag": _env_api_key_diag(),
+        "routing": {
+            "chat_completions": (
+                "User-visible answers use the chat task profile (or env fallback)—e.g. Moonshot kimi."
+            ),
+            "rag_query_embeddings": (
+                "RAG retrieves context by embedding the question. Moonshot has no suitable "
+                "embedding API for EMBED_MODEL here; when the resolved embed host is Moonshot, "
+                "query vectors use sync embed() from .env (LLM_EMBED_API_KEY / LLM_BASE_URL / EMBED_MODEL, "
+                "typically NVIDIA). Chroma ingest uses the same env sync embed path."
+            ),
+        },
+        "ingest_defaults": {
+            "chunk_size": INGEST_CHUNK_SIZE,
+            "chunk_overlap": INGEST_CHUNK_OVERLAP,
+        },
+        "chat": {
+            "source": "profile" if chat_src_profile else "env",
+            "profile_id": chat_pid,
+            "profile_name": (chat_prof or {}).get("name") if chat_prof else None,
+            "base_url": str(resolved_chat.base_url or "").strip(),
+            "chat_model": str(resolved_chat.default_model or "").strip(),
+            "api_key_configured": bool(resolved_chat.api_key),
+            "api_key_mode": chat_mode,
+            "api_key_env_name": chat_key_name,
+            "process_env_winning_key_name": chat_key_name
+            if chat_mode == "process_env"
+            else None,
+        },
+        "embed_task": {
+            "source": "profile" if embed_src_profile else "env",
+            "profile_id": embed_pid,
+            "profile_name": (embed_prof or {}).get("name") if embed_prof else None,
+            "base_url": str(resolved_embed.base_url or "").strip(),
+            "embed_model": str(resolved_embed.default_model or "").strip(),
+            "api_key_configured": bool(resolved_embed.api_key),
+            "api_key_mode": embed_mode,
+            "api_key_env_name": embed_key_name,
+            "process_env_winning_key_name": embed_key_name
+            if embed_mode == "process_env"
+            else None,
+        },
+        "ingest_embed_sync": {
+            "note": (
+                "Chroma ingest uses sync embed() with LLM_BASE_URL and LLM_EMBED_API_KEY "
+                "(not necessarily the async embed-task profile)."
+            ),
+            "base_url": str(LLM_BASE_URL or "").strip(),
+            "embed_model": EMBED_MODEL,
+            "api_key_configured": bool(LLM_EMBED_API_KEY),
+            "api_key_mode": "process_env",
+            "api_key_env_name": sync_embed_key,
+        },
+    }
+
+
+_rag_eval_jobs: dict[str, dict[str, Any]] = {}
+_rag_eval_job_lock = asyncio.Lock()
+
+
+async def _rag_eval_job_runner(
+    job_id: str,
+    user: dict,
+    cases: list[rag_eval.TestCase],
+    *,
+    run_id: str,
+    source_ref: str,
+    sleep_between_seconds: float,
+    max_retries: int,
+    retry_wait_seconds: int,
+    per_request_timeout: float | None,
+    min_api_ok_pass_rate: float | None,
+    min_api_ok_count: int,
+    compare_prev: list[dict[str, Any]] | None,
+) -> None:
+    async with _rag_eval_job_lock:
+        job = _rag_eval_jobs.get(job_id)
+        if job:
+            job["status"] = "running"
+            job["started_at"] = datetime.now(timezone.utc).isoformat()
+    try:
+        async def on_progress(partial: list[dict[str, Any]]) -> None:
+            async with _rag_eval_job_lock:
+                j = _rag_eval_jobs.get(job_id)
+                if j:
+                    j["results"] = partial
+                    j["progress"] = {"done": len(partial), "total": len(cases)}
+
+        results, summary = await rag_eval.run_suite_internal(
+            cases,
+            user,
+            run_id=run_id,
+            source_ref=source_ref,
+            sleep_between_seconds=sleep_between_seconds,
+            max_retries=max_retries,
+            retry_wait_seconds=retry_wait_seconds,
+            per_request_timeout=per_request_timeout,
+            on_progress=on_progress,
+        )
+        report = rag_eval.merge_report(
+            results=results,
+            summary=summary,
+            user=user,
+            compare_prev_results=compare_prev,
+        )
+        report["llm_runtime"] = _public_llm_runtime_snapshot()
+        ok_gate, gate_msg = rag_eval.check_api_ok_gates(
+            summary,
+            min_api_ok_pass_rate=min_api_ok_pass_rate,
+            min_api_ok_count=min_api_ok_count,
+        )
+        async with _rag_eval_job_lock:
+            j = _rag_eval_jobs.get(job_id)
+            if j:
+                j["status"] = "completed"
+                j["finished_at"] = datetime.now(timezone.utc).isoformat()
+                j["report"] = report
+                j["results"] = report["results"]
+                j["summary"] = report["summary"]
+                j["progress"] = {"done": len(results), "total": len(cases)}
+                j["gate_ok"] = ok_gate
+                j["gate_message"] = gate_msg
+    except Exception as exc:
+        async with _rag_eval_job_lock:
+            j = _rag_eval_jobs.get(job_id)
+            if j:
+                j["status"] = "failed"
+                j["finished_at"] = datetime.now(timezone.utc).isoformat()
+                j["error"] = str(exc)
 
 
 def _history_from_active_chat(user: dict, fallback: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -756,9 +1402,12 @@ def _looks_like_existing_ticket_status_question(message: str) -> bool:
 
 
 def _apply_safety_and_category_rules(payload: dict, message: str) -> dict:
+    log = logging.getLogger("fm.chat")
     words = _tokens(message)
-    category = str(payload.get("category", "General") or "General")
-    priority = str(payload.get("priority", "NORMAL") or "NORMAL").upper()
+    orig_category = str(payload.get("category", "General") or "General")
+    orig_priority = str(payload.get("priority", "NORMAL") or "NORMAL").upper()
+    category = orig_category
+    priority = orig_priority
     if priority not in {"LOW", "NORMAL", "HIGH", "URGENT"}:
         priority = "NORMAL"
 
@@ -891,6 +1540,29 @@ def _apply_safety_and_category_rules(payload: dict, message: str) -> dict:
     if _is_escalation_signal(message):
         priority = _bump_priority_one_level(priority)
 
+    # Never accept LOW when the user message clearly signals incident / safety / leak paths
+    # (mitigates doc-injected "downgrade priority" if the user still describes the hazard).
+    if priority == "LOW":
+        if words & SAFETY_URGENT_HINTS:
+            priority = "HIGH"
+        elif words & {"leak", "leaking", "flood", "flooding"} or (
+            "spark" in msg_lower or "sparking" in msg_lower
+        ):
+            priority = "HIGH"
+        elif "stuck" in msg_lower and "elevator" in msg_lower:
+            priority = "HIGH"
+        elif (words & INCIDENT_HINTS) and (words & SAFETY_HIGH_HINTS):
+            priority = "HIGH"
+
+    if category != orig_category or priority != orig_priority:
+        log.info(
+            "post_rules_adjustment category=%s->%s priority=%s->%s",
+            orig_category,
+            category,
+            orig_priority,
+            priority,
+        )
+
     payload["category"] = category
     payload["priority"] = priority
     return payload
@@ -1003,6 +1675,165 @@ def _extract_partial_response_text(raw: str) -> str:
     return "".join(out)
 
 
+def _chat_ticket_create_rows(
+    payload: dict[str, Any],
+    *,
+    should_create_ticket: bool,
+    req: ChatRequest,
+    message_issue_summary: str,
+    water_on_electronics: bool,
+    escalation_signal: bool,
+) -> list[dict[str, Any]]:
+    """Build per-ticket field rows for ``create_ticket`` (one user message, N tickets)."""
+    if not should_create_ticket:
+        return []
+    issues = payload.get("issues") or []
+    multi = (
+        MULTI_TICKET_PER_MESSAGE_ENABLED
+        and isinstance(issues, list)
+        and len(issues) > 0
+    )
+
+    def _apply_safety_to_row(row: dict[str, Any]) -> dict[str, Any]:
+        r = dict(row)
+        if water_on_electronics:
+            r["category"] = "Safety"
+            r["priority"] = "URGENT"
+        elif escalation_signal:
+            r["priority"] = _bump_priority_one_level(str(r.get("priority") or "NORMAL"))
+        return r
+
+    if multi:
+        rows: list[dict[str, Any]] = []
+        for it in issues:
+            if not isinstance(it, dict):
+                continue
+            if str(it.get("create_ticket", "NO")).upper() != "YES":
+                continue
+            summ = str(it.get("issue_summary") or "").strip()
+            if not summ:
+                continue
+            rows.append(
+                _apply_safety_to_row(
+                    {
+                        "issue_summary": summ,
+                        "category": str(it.get("category") or "General"),
+                        "priority": str(it.get("priority") or "NORMAL"),
+                        "department": str(
+                            it.get("department") or "Facility Management"
+                        ),
+                    }
+                )
+            )
+        if not rows:
+            rows = [
+                _apply_safety_to_row(
+                    {
+                        "issue_summary": message_issue_summary,
+                        "category": str(payload.get("category") or "General"),
+                        "priority": str(payload.get("priority") or "NORMAL"),
+                        "department": str(
+                            payload.get("department") or "Facility Management"
+                        ),
+                    }
+                )
+            ]
+        return rows
+
+    return [
+        _apply_safety_to_row(
+            {
+                "issue_summary": message_issue_summary,
+                "category": str(payload.get("category") or "General"),
+                "priority": str(payload.get("priority") or "NORMAL"),
+                "department": str(
+                    payload.get("department") or "Facility Management"
+                ),
+            }
+        )
+    ]
+
+
+def _finalize_injection_blocked_chat(
+    req: ChatRequest,
+    payload: dict,
+    context: list[str],
+    sources: list[str],
+    user: dict,
+) -> dict:
+    """Finalize path when regex/LLM input guard blocked the main model (no tickets, no gaps)."""
+    ib = str(payload.get("_injection_block") or "unknown")
+    p = dict(payload)
+    query_type = str(p.get("query_type") or "INFORMATIONAL")
+    issue_summary = str(p.get("issue_summary") or "").strip() or (
+        "Message blocked by input safety filter."
+    )
+    ticket_ids: list[int] = []
+    ticket_created = False
+    ticket_id: int | None = None
+    response_text = str(p.get("response") or "")
+    uid = int(user.get("id") or 0)
+
+    p["context_count"] = len(context)
+    p["used_sources"] = sources
+    p["query_type"] = query_type
+    p["ticket_created"] = ticket_created
+    p["ticket_id"] = ticket_id
+    p["ticket_ids"] = ticket_ids
+    p["issue_summary"] = issue_summary
+
+    actual_output = {
+        "category": p.get("category", "General"),
+        "priority": p.get("priority", "NORMAL"),
+        "create_ticket": False,
+        "response": p.get("response", ""),
+        "issue_summary": issue_summary,
+        "ticket_ids": list(ticket_ids),
+    }
+    try:
+        retrieval_meta = {
+            "num_chunks": len(sources),
+            "any_chunk": bool(sources),
+            "context_count": len(context),
+            "ticket_ids": list(ticket_ids),
+            "injection_block": ib,
+        }
+        create_training_example(
+            input_text=req.message,
+            actual_output=actual_output,
+            user_id=user.get("id"),
+            user_role=str(user.get("role", "")),
+            query_type=str(query_type),
+            in_scope=str(p.get("in_scope", "")),
+            grounded=str(p.get("grounded", "")),
+            context_used=list(sources),
+            used_sources=list(sources),
+            context_count=len(context),
+            ticket_created=False,
+            ticket_id=ticket_id,
+            model=LLM_MODEL,
+            run_id=req.run_id.strip(),
+            source_type=req.source_type.strip() or "chat_log",
+            source_id=req.source_id.strip(),
+            source_ref=req.source_ref.strip(),
+            knowledge_gap_logged=False,
+            knowledge_gap_reason="",
+            retrieval_meta=retrieval_meta,
+        )
+    except Exception:
+        _obs_log.exception("create_training_example failed in injection-blocked chat finalize")
+    try:
+        append_chat_exchange(
+            int(user.get("id") or 0),
+            req.message,
+            response_text,
+        )
+    except Exception:
+        _obs_log.exception("append_chat_exchange failed in injection-blocked chat finalize")
+    p.pop("_injection_block", None)
+    return p
+
+
 def _finalize_chat_payload(
     req: ChatRequest,
     payload: dict,
@@ -1010,6 +1841,8 @@ def _finalize_chat_payload(
     sources: list[str],
     user: dict,
 ) -> dict:
+    if payload.get("_injection_block"):
+        return _finalize_injection_blocked_chat(req, payload, context, sources, user)
     payload = _apply_safety_and_category_rules(payload, req.message)
     query_type = _infer_query_type(req.message, payload.get("query_type", ""))
     if payload.get("in_scope") == "NO":
@@ -1069,34 +1902,52 @@ def _finalize_chat_payload(
     issue_summary = _fallback_issue_summary(payload.get("issue_summary", ""))
     if issue_summary == "No issue summary provided.":
         issue_summary = _fallback_issue_summary(req.message)
-    ticket_id: int | None = None
-    if should_create_ticket:
+
+    ticket_rows = _chat_ticket_create_rows(
+        payload,
+        should_create_ticket=should_create_ticket,
+        req=req,
+        message_issue_summary=issue_summary,
+        water_on_electronics=water_on_electronics,
+        escalation_signal=escalation_signal,
+    )
+    ticket_ids: list[int] = []
+    tickets_out: list[dict[str, Any]] = []
+    response_text = str(payload.get("response") or "")
+    uid = int(user.get("id") or 0)
+    for row in ticket_rows:
         ticket = create_ticket(
             message=req.message,
-            issue_summary=issue_summary,
-            category=payload.get("category") or "General",
-            priority=payload.get("priority") or "NORMAL",
-            department=payload.get("department") or "Facility Management",
-            response=payload.get("response") or "",
-            created_by_user_id=int(user.get("id") or 0),
+            issue_summary=row["issue_summary"],
+            category=row["category"],
+            priority=row["priority"],
+            department=row["department"],
+            response=response_text,
+            created_by_user_id=uid,
         )
-        ticket_id = ticket["id"]
+        ticket_ids.append(int(ticket["id"]))
+        tickets_out.append(ticket)
+    if tickets_out:
         try:
-            mail_notify.notify_ticket_created(ticket, user.get("username"))
+            mail_notify.notify_tickets_created_batch(tickets_out, user.get("username"))
         except Exception:
-            _obs_log.exception("mail notify_ticket_created failed (chat finalize)")
+            _obs_log.exception("mail notify ticket(s) failed (chat finalize)")
+    ticket_id: int | None = ticket_ids[0] if ticket_ids else None
+    ticket_created = bool(ticket_ids)
+
     payload["context_count"] = len(context)
     payload["used_sources"] = sources
     payload["query_type"] = query_type
-    payload["ticket_created"] = should_create_ticket
+    payload["ticket_created"] = ticket_created
     payload["ticket_id"] = ticket_id
+    payload["ticket_ids"] = ticket_ids
     payload["issue_summary"] = issue_summary
     heuristic_input = f"{conversation_text}\nUser: {req.message}".strip()
     should_log_knowledge_gap = (
         payload.get("in_scope") == "YES"
         and payload.get("grounded") == "NO"
         and query_type == "INFORMATIONAL"
-        and not should_create_ticket
+        and not ticket_created
         and not _has_operational_signal(heuristic_input)
         and not _is_acknowledgement(req.message)
         and _is_building_info_candidate(req.message, conversation_text)
@@ -1117,15 +1968,17 @@ def _finalize_chat_payload(
     actual_output = {
         "category": payload.get("category", "General"),
         "priority": payload.get("priority", "NORMAL"),
-        "create_ticket": bool(should_create_ticket),
+        "create_ticket": bool(ticket_created),
         "response": payload.get("response", ""),
         "issue_summary": issue_summary,
+        "ticket_ids": list(ticket_ids),
     }
     try:
         retrieval_meta = {
             "num_chunks": len(sources),
             "any_chunk": bool(sources),
             "context_count": len(context),
+            "ticket_ids": list(ticket_ids),
         }
         create_training_example(
             input_text=req.message,
@@ -1138,7 +1991,7 @@ def _finalize_chat_payload(
             context_used=list(sources),
             used_sources=list(sources),
             context_count=len(context),
-            ticket_created=bool(should_create_ticket),
+            ticket_created=bool(ticket_created),
             ticket_id=ticket_id,
             model=LLM_MODEL,
             run_id=req.run_id.strip(),
@@ -1160,26 +2013,29 @@ def _finalize_chat_payload(
         )
     except Exception:
         _obs_log.exception("append_chat_exchange failed in chat finalize")
+    payload.pop("_injection_block", None)
+    payload.pop("_output_guard_issues", None)
     return payload
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
-    _start_training_dataset_scheduler()
 
 
 def _run_llm_probe() -> dict[str, str]:
     """Single source of truth for the optional LLM sanity check used by /health and /health/llm.
     Uses LLM_HEALTH_TIMEOUT_SECONDS so monitors don't hang for the full chat timeout."""
-    if not NVIDIA_API_KEY:
-        return {"status": "warning", "message": "Missing NVIDIA_API_KEY"}
+    if not LLM_API_KEY:
+        return {
+            "status": "warning",
+            "message": "Missing LLM_API_KEY (or legacy NVIDIA_API_KEY)",
+        }
     try:
         reply = chat_with_health_timeout(
             [{"role": "user", "content": "Reply with: ok"}],
-            temperature=0,
         )
-        return {"status": "ok", "provider": "nvidia_nim", "probe": reply.strip()}
+        return {
+            "status": "ok",
+            "provider": "openai_compatible",
+            "base_url": LLM_BASE_URL,
+            "probe": reply.strip(),
+        }
     except Exception as exc:  # pragma: no cover
         return {"status": "error", "message": str(exc)}
 
@@ -1189,9 +2045,12 @@ def health(probe: int = Query(default=0, ge=0, le=1)) -> dict[str, str]:
     # Default: cheap liveness check (no external calls), so monitors don't hang
     # if the LLM provider is slow or offline. Pass `?probe=1` for full sanity.
     if probe != 1:
-        if not NVIDIA_API_KEY:
-            return {"status": "warning", "message": "Missing NVIDIA_API_KEY"}
-        return {"status": "ok", "provider": "nvidia_nim"}
+        if not LLM_API_KEY:
+            return {
+                "status": "warning",
+                "message": "Missing LLM_API_KEY (or legacy NVIDIA_API_KEY)",
+            }
+        return {"status": "ok", "provider": "openai_compatible", "base_url": LLM_BASE_URL}
     return _run_llm_probe()
 
 
@@ -1206,25 +2065,9 @@ async def api_chat(
     request: Request, req: ChatRequest, user: dict = Depends(_require_auth)
 ) -> dict:
     try:
-        # All sync I/O (SQLite, Chroma) runs in a worker thread so the event
-        # loop stays responsive while we wait on the LLM HTTP call.
-        req.history = await asyncio.to_thread(
-            _history_from_active_chat, user, req.history
-        )
-        context, sources = await asyncio.to_thread(
-            retrieve_with_sources, req.message, RAG_TOP_K
-        )
-        raw_response = await agenerate(req.message, context, req.history)
+        return await run_chat_core(req, user, isolate_history=False)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    try:
-        payload = parse_llm_json(raw_response)
-    except Exception:
-        payload = fallback_response(raw_response)
-    payload = _apply_fm_safety_net(payload, req.message)
-    return await asyncio.to_thread(
-        _finalize_chat_payload, req, payload, context, sources, user
-    )
 
 
 @app.post("/api/chat/stream")
@@ -1237,29 +2080,72 @@ async def api_chat_stream(
 
     async def generate_events():
         try:
-            req.history = await asyncio.to_thread(
-                _history_from_active_chat, user, req.history
+            chat_req = await chat_request_with_merged_history(
+                req, user, isolate_history=False
             )
-            context, sources = await asyncio.to_thread(
-                retrieve_with_sources, req.message, RAG_TOP_K
-            )
+            resolved = resolve_llm_profile_for_task("chat")
+            context: list[str] = []
+            sources: list[str] = []
             raw = ""
             streamed_len = 0
-            async for chunk in agenerate_stream(req.message, context, req.history):
-                raw += chunk
-                partial_response = _extract_partial_response_text(raw)
-                if len(partial_response) > streamed_len:
-                    delta = partial_response[streamed_len:]
-                    streamed_len = len(partial_response)
-                    if delta:
-                        yield event({"type": "chunk", "delta": delta})
-            try:
-                payload = parse_llm_json(raw)
-            except Exception:
-                payload = fallback_response(raw)
-            payload = _apply_fm_safety_net(payload, req.message)
+
+            if regex_hits_injection(chat_req.message):
+                payload = synthetic_injection_blocked_payload("regex")
+            elif CHAT_INJECTION_LLM_FILTER:
+                inj = await llm_classify_injection(
+                    chat_req.message, resolved=resolved
+                )
+                if inj == "INJECTION":
+                    payload = synthetic_injection_blocked_payload("llm")
+                else:
+                    context, sources = await asyncio.to_thread(
+                        retrieve_with_sources, chat_req.message, effective_rag_top_k()
+                    )
+                    async for chunk in agenerate_stream(
+                        chat_req.message,
+                        context,
+                        chat_req.history,
+                        resolved=resolved,
+                    ):
+                        raw += chunk
+                        partial_response = _extract_partial_response_text(raw)
+                        if len(partial_response) > streamed_len:
+                            delta = partial_response[streamed_len:]
+                            streamed_len = len(partial_response)
+                            if delta:
+                                yield event({"type": "chunk", "delta": delta})
+                    try:
+                        payload = parse_llm_json(raw)
+                    except Exception:
+                        payload = fallback_response(raw)
+                    payload = apply_output_guardrails(payload, chat_req.message)
+                    payload = _apply_fm_safety_net(payload, chat_req.message)
+            else:
+                context, sources = await asyncio.to_thread(
+                    retrieve_with_sources, chat_req.message, effective_rag_top_k()
+                )
+                async for chunk in agenerate_stream(
+                    chat_req.message,
+                    context,
+                    chat_req.history,
+                    resolved=resolved,
+                ):
+                    raw += chunk
+                    partial_response = _extract_partial_response_text(raw)
+                    if len(partial_response) > streamed_len:
+                        delta = partial_response[streamed_len:]
+                        streamed_len = len(partial_response)
+                        if delta:
+                            yield event({"type": "chunk", "delta": delta})
+                try:
+                    payload = parse_llm_json(raw)
+                except Exception:
+                    payload = fallback_response(raw)
+                payload = apply_output_guardrails(payload, chat_req.message)
+                payload = _apply_fm_safety_net(payload, chat_req.message)
+
             final_payload = await asyncio.to_thread(
-                _finalize_chat_payload, req, payload, context, sources, user
+                _finalize_chat_payload, chat_req, payload, context, sources, user
             )
             final_response = final_payload.get("response", "")
             if isinstance(final_response, str) and len(final_response) > streamed_len:
@@ -1568,6 +2454,24 @@ def api_admin_user_patch(
     return {"user": updated}
 
 
+@app.post("/api/admin/users/{user_id}/erase-chat-training-data")
+def api_admin_user_erase_chat_training_data(
+    user_id: int,
+    req: AdminUserEraseChatTrainingRequest,
+    _: dict = Depends(_require_admin),
+) -> dict:
+    target = get_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if (req.confirm_username or "").strip() != str(target.get("username") or ""):
+        raise HTTPException(
+            status_code=400,
+            detail="confirm_username must exactly match the target user's username",
+        )
+    counts = erase_user_chat_and_training_data(user_id)
+    return {"ok": True, "user_id": user_id, "deleted": counts}
+
+
 @app.get("/api/admin/docs")
 def api_admin_docs(_: dict = Depends(_require_admin)) -> dict:
     root = _docs_root()
@@ -1618,13 +2522,59 @@ def api_admin_doc_delete(name: str, _: dict = Depends(_require_admin)) -> dict:
     return {"deleted": True, "name": name}
 
 
+@app.get("/api/admin/reindex/defaults")
+def api_admin_reindex_defaults(_: dict = Depends(_require_admin)) -> dict:
+    return _admin_reindex_defaults_payload()
+
+
+@app.get("/api/admin/rag/settings")
+def api_admin_rag_settings_get(_: dict = Depends(_require_admin)) -> dict:
+    return _admin_rag_settings_response()
+
+
+@app.post("/api/admin/rag/settings")
+@app.patch("/api/admin/rag/settings")
+def api_admin_rag_settings_patch(
+    req: AdminRagSettingsPatchRequest,
+    _: dict = Depends(_require_admin),
+) -> dict:
+    if req.clear_rag_top_k_override and req.rag_top_k is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Use either clear_rag_top_k_override or rag_top_k, not both",
+        )
+    if req.clear_rag_top_k_override:
+        delete_meta(RAG_TOP_K_META_KEY)
+    elif req.rag_top_k is not None:
+        lim = rag_top_k_admin_detail()["limits"]
+        k = int(req.rag_top_k)
+        lo, hi = int(lim["min"]), int(lim["max"])
+        if k < lo or k > hi:
+            raise HTTPException(
+                status_code=422,
+                detail=f"rag_top_k must be between {lo} and {hi}",
+            )
+        set_meta(RAG_TOP_K_META_KEY, str(k))
+    return _admin_rag_settings_response()
+
+
+@app.get("/api/admin/llm/chat-target")
+def api_admin_llm_chat_target(_: dict = Depends(_require_admin)) -> dict:
+    return _public_llm_runtime_snapshot()
+
+
 @app.post("/api/admin/reindex")
-def api_admin_reindex(_: dict = Depends(_require_admin)) -> dict:
+def api_admin_reindex(
+    _: dict = Depends(_require_admin),
+    chunk_size: int | None = Query(default=None),
+    chunk_overlap: int | None = Query(default=None),
+) -> dict:
+    cs, co = _resolved_ingest_chunk_params(chunk_size, chunk_overlap)
     try:
-        count = run_ingest()
+        count = run_ingest(chunk_size=cs, chunk_overlap=co)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return {"chunks_indexed": count}
+    return {"chunks_indexed": count, "chunk_size": cs, "chunk_overlap": co}
 
 
 @app.post("/api/admin/upload")
@@ -1632,6 +2582,8 @@ async def api_admin_upload(
     file: UploadFile = File(...),
     overwrite: bool = Form(default=True),
     auto_reindex: bool = Form(default=False),
+    chunk_size: int | None = Form(default=None),
+    chunk_overlap: int | None = Form(default=None),
     _: dict = Depends(_require_admin),
 ) -> dict:
     filename = file.filename or ""
@@ -1651,15 +2603,24 @@ async def api_admin_upload(
     if not text.strip():
         raise HTTPException(status_code=400, detail="No extractable text found in file")
 
+    text = sanitize_document_text(text, enabled=DOCS_SANITIZE_INSTRUCTION_LIKE)
+
     target_name = f"{_safe_stem(filename)}.md"
     path = _doc_path(target_name)
     if path.exists() and not overwrite:
         raise HTTPException(status_code=409, detail="Target document already exists")
     path.write_text(text, encoding="utf-8")
     reindex_count: int | None = None
+    reindex_chunk_size: int | None = None
+    reindex_chunk_overlap: int | None = None
     if auto_reindex:
         try:
-            reindex_count = run_ingest()
+            cs, co = _resolved_ingest_chunk_params(chunk_size, chunk_overlap)
+            reindex_count = run_ingest(chunk_size=cs, chunk_overlap=co)
+            reindex_chunk_size = cs
+            reindex_chunk_overlap = co
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(
                 status_code=500, detail=f"Upload succeeded, but reindex failed: {exc}"
@@ -1671,6 +2632,8 @@ async def api_admin_upload(
         "chars": len(text),
         "auto_reindexed": auto_reindex,
         "chunks_indexed": reindex_count,
+        "chunk_size": reindex_chunk_size,
+        "chunk_overlap": reindex_chunk_overlap,
     }
 
 
@@ -1768,7 +2731,10 @@ def api_admin_knowledge_gap_resolve(
     chunks_indexed: int | None = None
     if req.auto_reindex:
         try:
-            chunks_indexed = run_ingest()
+            cs, co = _resolved_ingest_chunk_params(req.chunk_size, req.chunk_overlap)
+            chunks_indexed = run_ingest(chunk_size=cs, chunk_overlap=co)
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Resolve saved, reindex failed: {exc}") from exc
 
@@ -1808,82 +2774,24 @@ def api_admin_training_quality_groups(
     return list_pending_grouped(limit_per_group=limit_per_group)
 
 
-_GOLDEN_PATH = Path(TRAINING_DATA_DIR) / "eval_golden.jsonl"
-
-
-async def _execute_eval_run(run_id: int) -> None:
-    """Background task: run all golden cases and finalize the eval_run row."""
-    try:
-        cases = await asyncio.to_thread(load_golden, _GOLDEN_PATH)
-        if not cases:
-            await asyncio.to_thread(
-                finalize_eval_run,
-                run_id,
-                status="error",
-                total=0,
-                passed=0,
-                accuracy_overall=None,
-                accuracy_category=None,
-                accuracy_priority=None,
-                accuracy_ticket_created=None,
-                accuracy_response_tokens=None,
-                details={"error": "Golden snapshot empty or missing"},
-            )
-            return
-        summary: EvalSummary = await run_eval(cases, max_concurrency=8)
-        await asyncio.to_thread(
-            finalize_eval_run,
-            run_id,
-            status="done",
-            total=summary.total,
-            passed=summary.passed,
-            accuracy_overall=summary.accuracy_overall,
-            accuracy_category=summary.accuracy_category,
-            accuracy_priority=summary.accuracy_priority,
-            accuracy_ticket_created=summary.accuracy_ticket_created,
-            accuracy_response_tokens=summary.accuracy_response_tokens,
-            details={
-                "elapsed_seconds": summary.elapsed_seconds,
-                "failures": [
-                    {"case_id": r.case_id, "failures": r.failures, "error": r.error}
-                    for r in summary.results
-                    if not r.passed
-                ],
-            },
-        )
-    except Exception as exc:
-        _obs_log.exception("eval_run %s crashed", run_id)
-        try:
-            finalize_eval_run(
-                run_id,
-                status="error",
-                total=0,
-                passed=0,
-                accuracy_overall=None,
-                accuracy_category=None,
-                accuracy_priority=None,
-                accuracy_ticket_created=None,
-                accuracy_response_tokens=None,
-                details={"error": str(exc)},
-            )
-        except Exception:
-            _obs_log.exception("finalize_eval_run after crash also failed (run %s)", run_id)
-
-
 @app.post("/api/admin/training-quality/eval/run")
 async def api_admin_training_quality_eval_run(
     _: dict = Depends(_require_admin),
 ) -> dict:
-    if has_running_eval_run():
-        raise HTTPException(status_code=409, detail="Eval run already in progress")
-    if not _GOLDEN_PATH.exists():
-        raise HTTPException(
-            status_code=412,
-            detail=f"Golden snapshot missing: {_GOLDEN_PATH}. Run scripts.build_golden_snapshot first.",
-        )
-    run_id = create_eval_run()
-    asyncio.create_task(_execute_eval_run(run_id))
-    return {"run_id": run_id, "status": "running"}
+    """REMOVED. The full eval_golden flow was retired in favor of per-override
+    replay (`POST /api/admin/training-quality/overrides/{id}/replay`).
+
+    Returns 410 Gone so callers fail loudly. The columns and helpers stick
+    around until Phase 4 migration removes them.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "eval_golden flow is removed. Use "
+            "POST /api/admin/training-quality/overrides/{id}/replay for an "
+            "on-demand mini-replay."
+        ),
+    )
 
 
 @app.get("/api/admin/training-quality/eval/runs")
@@ -1905,13 +2813,149 @@ def api_admin_training_quality_eval_run_by_id(
     return {"run": item}
 
 
+@app.post("/api/admin/rag-eval/jobs")
+async def api_admin_rag_eval_start_job(
+    suite: str = Form(...),
+    case_ids: str = Form(""),
+    run_id: str = Form(""),
+    source_ref: str = Form(""),
+    sleep_between_seconds: float = Form(15.0),
+    max_retries: int = Form(3),
+    retry_wait_seconds: int = Form(10),
+    min_api_ok_pass_rate: str = Form(""),
+    min_api_ok_count: int = Form(0),
+    per_request_timeout_seconds: float = Form(240.0),
+    suite_file: UploadFile | None = File(None),
+    compare_file: UploadFile | None = File(None),
+    user: dict = Depends(_require_admin),
+) -> dict:
+    """Start a background RAG/chat eval job (isolated history per case)."""
+    kind = suite.strip().lower()
+    ref_default: str
+    if kind == "builtin":
+        cases = rag_eval.build_builtin_cases()
+        ref_default = "builtin_cases"
+    elif kind == "json":
+        if not suite_file or not suite_file.filename:
+            raise HTTPException(
+                status_code=422, detail="suite_file is required for json suite"
+            )
+        raw = await suite_file.read()
+        cases = rag_eval.build_test_cases_from_json_bytes(raw)
+        ref_default = suite_file.filename or "uploaded.json"
+    elif kind == "csv":
+        if not suite_file or not suite_file.filename:
+            raise HTTPException(
+                status_code=422, detail="suite_file is required for csv suite"
+            )
+        raw = await suite_file.read()
+        cases = rag_eval.build_test_cases_from_csv_bytes(raw)
+        ref_default = suite_file.filename or "uploaded.csv"
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="suite must be one of: builtin, json, csv",
+        )
+
+    if not cases:
+        raise HTTPException(status_code=422, detail="suite contains no test cases")
+
+    if case_ids.strip():
+        wanted = rag_eval.parse_case_ids_blob(case_ids)
+        cases = [c for c in cases if c.id in wanted]
+        if not cases:
+            raise HTTPException(
+                status_code=422, detail="no cases left after case_ids filter"
+            )
+
+    compare_prev: list[dict[str, Any]] | None = None
+    if compare_file and compare_file.filename:
+        craw = await compare_file.read()
+        if len(craw) > rag_eval.MAX_SUITE_UPLOAD_BYTES:
+            raise HTTPException(status_code=422, detail="compare_file too large")
+        try:
+            data = json.loads(craw.decode("utf-8-sig"))
+            compare_prev = list(data.get("results", []))
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise HTTPException(
+                status_code=422, detail=f"compare_file must be JSON with results[]: {exc}"
+            ) from exc
+
+    min_rate: float | None = None
+    mpr = (min_api_ok_pass_rate or "").strip()
+    if mpr:
+        try:
+            min_rate = float(mpr)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail="min_api_ok_pass_rate must be a number"
+            ) from exc
+        if not (0.0 <= min_rate <= 100.0):
+            raise HTTPException(
+                status_code=422, detail="min_api_ok_pass_rate must be between 0 and 100"
+            )
+
+    job_id = str(uuid.uuid4())
+    rid = run_id.strip() or datetime.now(timezone.utc).strftime("testrun-%Y%m%dT%H%M%SZ")
+    sref = source_ref.strip() or ref_default
+    timeout = per_request_timeout_seconds if per_request_timeout_seconds > 0 else None
+
+    async with _rag_eval_job_lock:
+        _rag_eval_jobs[job_id] = {
+            "id": job_id,
+            "status": "queued",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": None,
+            "finished_at": None,
+            "progress": {"done": 0, "total": len(cases)},
+            "results": [],
+            "report": None,
+            "summary": None,
+            "error": None,
+            "gate_ok": None,
+            "gate_message": None,
+        }
+
+    asyncio.create_task(
+        _rag_eval_job_runner(
+            job_id,
+            user,
+            cases,
+            run_id=rid,
+            source_ref=sref,
+            sleep_between_seconds=sleep_between_seconds,
+            max_retries=max_retries,
+            retry_wait_seconds=retry_wait_seconds,
+            per_request_timeout=timeout,
+            min_api_ok_pass_rate=min_rate,
+            min_api_ok_count=min_api_ok_count,
+            compare_prev=compare_prev,
+        )
+    )
+    return {"job_id": job_id}
+
+
+@app.get("/api/admin/rag-eval/jobs/{job_id}")
+async def api_admin_rag_eval_job_status(
+    job_id: str,
+    _: dict = Depends(_require_admin),
+) -> dict:
+    async with _rag_eval_job_lock:
+        job = _rag_eval_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job": job}
+
+
 class PromptOverrideApplyRequest(BaseModel):
     error_type: str
     suggested_change: str = ""
     approved_change: str
+    rationale: str = ""
     affected_example_ids: list[int] = []
     confidence: float = 1.0
     manually_edited: bool = False
+    force: bool = False
 
 
 @app.post("/api/admin/training-quality/overrides/apply")
@@ -1919,12 +2963,16 @@ async def api_admin_overrides_apply(
     req: PromptOverrideApplyRequest,
     user: dict = Depends(_require_admin),
 ) -> dict:
-    """Faza E: apply a (possibly manager-edited) prompt override.
+    """Apply a (possibly manager-edited) prompt override.
+
     Guards:
-      - 422 baseline_required if no fresh eval_runs (within EVAL_BASELINE_MAX_AGE_HOURS)
       - 422 max_active_overrides if MAX_ACTIVE_OVERRIDES already active
       - 422 low_confidence if analyzer confidence < OVERRIDE_MIN_CONFIDENCE
         and the manager did not explicitly mark the change as manually_edited
+
+    Note: testing the override now happens through a separate
+    POST /overrides/{id}/replay request (mini-replay on affected examples plus
+    paraphrases). The legacy `eval_baseline_id` flow is no longer required.
     """
     approved = (req.approved_change or "").strip()
     if not approved:
@@ -1948,58 +2996,298 @@ async def api_admin_overrides_apply(
             ),
         )
 
-    baseline = latest_done_eval_run(within_seconds=EVAL_BASELINE_MAX_AGE_HOURS * 3600)
-    if not baseline:
+    base_head = get_effective_system_prompt_head()
+
+    active_overrides = list_prompt_overrides(status="active", limit=200)
+    duplicate = find_duplicate_rule(approved, base_head, active_overrides)
+    _tq_log.debug(
+        "apply override duplicate-check approved_len=%d active=%d force=%s is_dup=%s score=%s",
+        len(approved),
+        len(active_overrides),
+        bool(req.force),
+        bool(duplicate.get("is_duplicate")),
+        duplicate.get("score"),
+    )
+    if duplicate.get("is_duplicate") and not req.force:
         raise HTTPException(
-            status_code=422,
-            detail=(
-                "baseline_required: no eval_run with status=done in the last "
-                f"{EVAL_BASELINE_MAX_AGE_HOURS}h. Run an eval first."
-            ),
+            status_code=409,
+            detail={
+                "message": "duplicate_prompt_rule",
+                "duplicate": duplicate,
+            },
         )
 
     record = db_apply_prompt_override(
         error_type=req.error_type,
         suggested_change=req.suggested_change,
         approved_change=approved,
+        rationale=req.rationale.strip(),
         affected_example_ids=req.affected_example_ids,
         created_by_user_id=user.get("id"),
-        eval_baseline_id=int(baseline.get("id") or 0) or None,
+        eval_baseline_id=None,
+    )
+    record_prompt_override_audit(
+        override_id=int(record.get("id") or 0),
+        action="apply",
+        actor_user_id=user.get("id"),
+        payload={
+            "error_type": req.error_type,
+            "affected_count": len(req.affected_example_ids or []),
+            "force": bool(req.force),
+        },
     )
 
-    # Schedule eval_after in the background unless one is already running.
-    eval_after_run_id: int | None = None
-    if not has_running_eval_run():
-        try:
-            eval_after_run_id = create_eval_run(override_active_ids=[record["id"]])
-            asyncio.create_task(_execute_eval_run(eval_after_run_id))
-            set_prompt_override_eval_after(record["id"], eval_after_run_id)
-        except Exception:
-            _obs_log.exception("scheduling eval_after for override %s failed", record.get("id"))
+    return {"override": record}
+
+
+class PromptOverrideConsolidateRequest(BaseModel):
+    force: bool = False
+    llm_profile_id: int | None = None
+
+
+@app.post("/api/admin/training-quality/overrides/consolidate")
+@limiter.limit("2/5minute")
+async def api_admin_overrides_consolidate(
+    request: Request,
+    req: PromptOverrideConsolidateRequest,
+    user: dict = Depends(_require_admin),
+) -> dict:
+    """Merge all active prompt overrides into one via LLM, atomically in SQLite.
+
+    Allowed only when active count equals ``MAX_ACTIVE_OVERRIDES``. If the merged
+    text duplicates the base system prompt, returns 409 unless ``force`` is true.
+    """
+    from .prompt_consolidator import merge_active_overrides_async
+
+    n = count_active_prompt_overrides()
+    if n != MAX_ACTIVE_OVERRIDES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"consolidate_requires_full_cap: have {n} active, need exactly "
+                f"{MAX_ACTIVE_OVERRIDES}"
+            ),
+        )
+    active_rows = get_active_prompt_overrides(force_refresh=True)
+    expected_ids = [int(r["id"]) for r in active_rows]
+    if len(expected_ids) != MAX_ACTIVE_OVERRIDES:
+        raise HTTPException(
+            status_code=422,
+            detail="active_override_count_mismatch_refresh_and_retry",
+        )
+
+    from .llm_profiles import resolve_llm_profile_for_task
+
+    try:
+        merge_result = await merge_active_overrides_async(
+            active_rows,
+            llm_profile=resolve_llm_profile_for_task(
+                "consolidator", profile_id=req.llm_profile_id
+            ),
+        )
+    except APIStatusError as exc:
+        if exc.status_code == 429:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "NVIDIA API rate limit (429). Wait about one minute, then retry. "
+                    "Avoid running Analyze reviews and consolidate immediately after heavy chat use."
+                ),
+            ) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=f"Consolidator failed: {exc}",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Consolidator failed: {exc}",
+        ) from exc
+
+    duplicate = find_duplicate_rule(
+        merge_result.merged_rule,
+        get_effective_system_prompt_head(),
+        [],
+    )
+    if duplicate.get("is_duplicate") and not req.force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "duplicate_prompt_rule",
+                "duplicate": duplicate,
+            },
+        )
+
+    id_part = ", ".join(str(i) for i in expected_ids)
+    full_rationale = (
+        f"{merge_result.rationale.strip()}\n\n"
+        f"Superseded override ids: {id_part}"
+    ).strip()
+
+    try:
+        record, superseded = consolidate_active_prompt_overrides(
+            error_type="consolidated",
+            suggested_change=f"Merged {len(expected_ids)} active rules",
+            approved_change=merge_result.merged_rule.strip(),
+            rationale=full_rationale,
+            created_by_user_id=user.get("id"),
+            expected_superseded_ids=expected_ids,
+        )
+    except ValueError as exc:
+        if str(exc) == "active_override_set_changed":
+            raise HTTPException(
+                status_code=409,
+                detail="active_override_set_changed_retry",
+            ) from exc
+        raise
+
+    new_id = int(record.get("id") or 0)
+    record_prompt_override_audit(
+        override_id=new_id,
+        action="consolidate",
+        actor_user_id=user.get("id"),
+        payload={
+            "superseded_ids": superseded,
+            "model": merge_result.model,
+            "force": bool(req.force),
+        },
+    )
+    for sid in superseded or []:
+        record_prompt_override_audit(
+            override_id=int(sid),
+            action="superseded",
+            actor_user_id=user.get("id"),
+            payload={"by_override_id": new_id},
+        )
 
     return {
         "override": record,
-        "baseline": {
-            "id": baseline.get("id"),
-            "accuracy_overall": baseline.get("accuracy_overall"),
-            "accuracy_category": baseline.get("accuracy_category"),
-            "accuracy_priority": baseline.get("accuracy_priority"),
-            "accuracy_ticket_created": baseline.get("accuracy_ticket_created"),
-            "accuracy_response_tokens": baseline.get("accuracy_response_tokens"),
-        },
-        "eval_after_run_id": eval_after_run_id,
+        "superseded_ids": superseded,
+        "model": merge_result.model,
     }
 
 
 @app.post("/api/admin/training-quality/overrides/{override_id}/rollback")
 async def api_admin_overrides_rollback(
     override_id: int,
-    _: dict = Depends(_require_admin),
+    user: dict = Depends(_require_admin),
 ) -> dict:
     record = db_rollback_prompt_override(override_id)
     if not record:
         raise HTTPException(status_code=404, detail="Override not active or not found")
+    record_prompt_override_audit(
+        override_id=int(record.get("id") or override_id),
+        action="rollback",
+        actor_user_id=user.get("id"),
+        payload={"prev_status": "active"},
+    )
     return {"override": record}
+
+
+@app.get("/api/admin/training-quality/overrides/{override_id}/audit")
+def api_admin_override_audit(
+    override_id: int,
+    limit: int = Query(default=50, ge=1, le=200),
+    _: dict = Depends(_require_admin),
+) -> dict:
+    """Lifecycle log for one prompt override (apply/rollback/consolidate)."""
+    return {"audit": list_prompt_override_audit(override_id, limit=limit)}
+
+
+@app.get("/api/admin/training-quality/dedup/audit")
+def api_admin_training_quality_dedup_audit(
+    window: int = Query(default=20, ge=1, le=100),
+    cosine_threshold: float | None = Query(default=None, ge=0.0, le=1.0),
+    _: dict = Depends(_require_admin),
+) -> dict:
+    """Dedup tuning aid: replay recent analyzer suggestions through both
+    the cheap and the embedding-second-stage filter and return what
+    *would* be hidden under the current thresholds versus the requested
+    ``cosine_threshold`` override.
+
+    Useful when calibrating ``EMBEDDING_DEDUP_COSINE_THRESHOLD`` after a
+    model swap. Reads only — never writes anything to the dedup tables.
+    """
+    from .config import (
+        EMBEDDING_DEDUP_COSINE_THRESHOLD as default_cosine,
+        EMBEDDING_DEDUP_LOWER_BOUND,
+        EMBEDDING_DEDUP_UPPER_BOUND,
+    )
+    from .database import (
+        get_active_prompt_overrides,
+        list_recent_suggestion_decisions,
+    )
+    from .prompt_rule_embeddings import cache_size, cosine_search
+    from .prompt_rule_similarity import (
+        SEQUENCE_DUPLICATE_THRESHOLD,
+        TOKEN_DUPLICATE_THRESHOLD,
+        _sequence_ratio,
+        _token_jaccard,
+        build_existing_rule_candidates,
+    )
+    decisions = list_recent_suggestion_decisions(limit=window)
+    active = get_active_prompt_overrides()
+    candidates = build_existing_rule_candidates(get_effective_system_prompt_head(), active)
+
+    effective_cosine = float(
+        cosine_threshold if cosine_threshold is not None else default_cosine
+    )
+
+    rows: list[dict[str, Any]] = []
+    for d in decisions:
+        suggestion = str(d.get("suggested_change") or "").strip()
+        if not suggestion:
+            continue
+        best_seq = 0.0
+        best_jac = 0.0
+        for cand in candidates:
+            text = cand.get("text") or ""
+            best_seq = max(best_seq, _sequence_ratio(suggestion, text))
+            best_jac = max(best_jac, _token_jaccard(suggestion, text))
+        cheap_score = max(best_seq, best_jac)
+        cheap_hit = (
+            best_seq >= SEQUENCE_DUPLICATE_THRESHOLD
+            or best_jac >= TOKEN_DUPLICATE_THRESHOLD
+        )
+        in_band = (
+            EMBEDDING_DEDUP_LOWER_BOUND <= cheap_score < EMBEDDING_DEDUP_UPPER_BOUND
+        )
+        cosine_score: float | None = None
+        embed_match: str | None = None
+        if in_band and not cheap_hit:
+            score, candidate = cosine_search(suggestion, candidates)
+            if candidate is not None:
+                cosine_score = round(float(score), 4)
+                embed_match = str(candidate.get("text") or "")
+        embed_hit = bool(
+            cosine_score is not None and cosine_score >= effective_cosine
+        )
+        rows.append(
+            {
+                "decision_id": d.get("id"),
+                "suggested_change": suggestion[:400],
+                "cheap_score": round(float(cheap_score), 4),
+                "cheap_hit": bool(cheap_hit),
+                "in_borderline_band": bool(in_band),
+                "cosine_score": cosine_score,
+                "embedding_hit": embed_hit,
+                "embedding_match_text": (embed_match or "")[:400] if embed_match else None,
+            }
+        )
+
+    rows_count, blob_bytes = cache_size()
+    return {
+        "thresholds": {
+            "sequence": SEQUENCE_DUPLICATE_THRESHOLD,
+            "token_jaccard": TOKEN_DUPLICATE_THRESHOLD,
+            "embedding_lower_bound": EMBEDDING_DEDUP_LOWER_BOUND,
+            "embedding_upper_bound": EMBEDDING_DEDUP_UPPER_BOUND,
+            "embedding_cosine_default": default_cosine,
+            "embedding_cosine_effective": effective_cosine,
+        },
+        "embedding_cache": {"rows": rows_count, "blob_bytes": blob_bytes},
+        "items": rows,
+    }
 
 
 @app.get("/api/admin/training-quality/overrides")
@@ -2009,105 +3297,679 @@ def api_admin_overrides_list(
     _: dict = Depends(_require_admin),
 ) -> dict:
     items = list_prompt_overrides(status=status, limit=limit)
-    # Hydrate baseline / after accuracy for the UI delta widget.
-    enriched: list[dict] = []
-    for it in items:
-        baseline_id = it.get("eval_baseline_id")
-        after_id = it.get("eval_after_id")
-        baseline_acc = None
-        after_acc = None
-        baseline_metrics = {
-            "overall": None,
-            "category": None,
-            "priority": None,
-            "ticket_created": None,
-            "response_tokens": None,
-        }
-        after_metrics = {
-            "overall": None,
-            "category": None,
-            "priority": None,
-            "ticket_created": None,
-            "response_tokens": None,
-        }
-        if baseline_id:
-            b = get_eval_run(int(baseline_id))
-            if b:
-                baseline_acc = b.get("accuracy_overall")
-                baseline_metrics = {
-                    "overall": b.get("accuracy_overall"),
-                    "category": b.get("accuracy_category"),
-                    "priority": b.get("accuracy_priority"),
-                    "ticket_created": b.get("accuracy_ticket_created"),
-                    "response_tokens": b.get("accuracy_response_tokens"),
-                }
-        if after_id:
-            a = get_eval_run(int(after_id))
-            if a:
-                after_acc = a.get("accuracy_overall")
-                after_metrics = {
-                    "overall": a.get("accuracy_overall"),
-                    "category": a.get("accuracy_category"),
-                    "priority": a.get("accuracy_priority"),
-                    "ticket_created": a.get("accuracy_ticket_created"),
-                    "response_tokens": a.get("accuracy_response_tokens"),
-                }
-        it["baseline_accuracy"] = baseline_acc
-        it["after_accuracy"] = after_acc
-        it["metrics"] = {"baseline": baseline_metrics, "after": after_metrics}
-        enriched.append(it)
+    # Baseline/after eval accuracy is no longer surfaced (replay supersedes that
+    # flow). Columns linger pending Phase 4 migration; the response is trimmed.
+    enriched = enrich_prompt_override_rows(list(items))
     return {"overrides": enriched}
 
 
-@app.get("/api/admin/training-quality/analysis")
-@limiter.limit("1/5minute")
-async def api_admin_training_quality_analysis(
-    request: Request,
+@app.get("/api/admin/training-quality/summary")
+def api_admin_training_quality_summary(
     _: dict = Depends(_require_admin),
 ) -> dict:
-    """Faza D: returns LLM-generated suggestions for current pending mismatches.
-    Cache hit (<TTL hours) returns instantly; miss spawns one LLM call through
-    the global RPM bucket. Per-user 1/5min limit prevents F5-spam burning the
-    NVIDIA budget on cold-misses."""
-    from .prompt_analyzer import analyze_pending_async  # local import: heavy module
-    from .rag import SYSTEM_PROMPT
+    """Cheap counters for the new Training Quality landing card.
 
-    cache_key = compute_pending_cache_key()
-    cached = get_prompt_analysis_cache(cache_key, ANALYZER_CACHE_TTL_HOURS)
+    Returns how many reviewed examples carry useful signal (edited / rejected /
+    note-only) so the UI can show "Co reviewerzy zglosili" without making any
+    LLM calls.
+    """
+    base_head = get_effective_system_prompt_head()
+
+    signals = list_review_signals_for_analysis(limit=200, max_examples_per_group=1)
+    active_overrides = list_prompt_overrides(status="active", limit=200)
+    active_summaries = []
+    for o in active_overrides:
+        ch = str(o.get("approved_change") or "").strip()
+        one_line = ch.split("\n", 1)[0].strip()
+        if len(one_line) > 120:
+            one_line = one_line[:119] + "…"
+        aff = o.get("affected_example_ids") or []
+        active_summaries.append(
+            {
+                "id": int(o["id"]),
+                "error_type": str(o.get("error_type") or ""),
+                "one_line_preview": one_line or "—",
+                "affected_example_count": len(aff) if isinstance(aff, list) else 0,
+            }
+        )
+    return {
+        "total_signals": signals.get("total_signals", 0),
+        "edited": signals.get("edited", 0),
+        "rejected": signals.get("rejected", 0),
+        "notes_only": signals.get("notes_only", 0),
+        "groups_count": len(signals.get("groups", [])),
+        "generated_at": signals.get("generated_at"),
+        "active_prompt_overrides": count_active_prompt_overrides(),
+        "max_active_prompt_overrides": MAX_ACTIVE_OVERRIDES,
+        "production_prompt": {
+            "fingerprint": _prompt_rule_fingerprint(base_head, active_overrides),
+            "base_prompt_template_hash": _base_system_prompt_template_fingerprint(
+                base_head
+            ),
+            "active_overrides": active_summaries,
+            "active_override_ids": [int(o["id"]) for o in active_overrides],
+        },
+    }
+
+
+@app.get("/api/admin/training-quality/system-prompt-head")
+def api_admin_training_quality_system_prompt_head(
+    _: dict = Depends(_require_admin),
+) -> dict[str, Any]:
+    """Return built-in default, optional DB override flag, and effective base prompt."""
+    from .rag import SYSTEM_PROMPT_HEAD
+
+    ov = get_rag_system_prompt_head_override()
+    eff = get_effective_system_prompt_head()
+    return {
+        "builtin_default": SYSTEM_PROMPT_HEAD,
+        "override_active": bool(ov and str(ov).strip()),
+        "effective": eff,
+        "char_count": len(eff or ""),
+    }
+
+
+@app.put("/api/admin/training-quality/system-prompt-head")
+def api_admin_training_quality_system_prompt_head_put(
+    body: AdminSystemPromptHeadPayload,
+    _: dict = Depends(_require_admin),
+) -> dict[str, Any]:
+    """Save or clear the FM base system prompt (first block in chat; not RAG snippets)."""
+    try:
+        return set_rag_system_prompt_head_override(body.override_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _build_analysis_context(llm_profile_id: int | None) -> dict[str, Any]:
+    """Common preamble shared by GET (cache-only) and POST (LLM run) analysis."""
+    base_head = get_effective_system_prompt_head()
+
+    active_overrides = list_prompt_overrides(status="active", limit=200)
+    discarded_for_filter = list_recent_suggestion_decisions(
+        decision="rejected", limit=ANALYZER_DISCARD_FILTER_DB_LIMIT
+    )
+    covered = covered_example_ids_from_active_overrides(active_overrides)
+    signals_for_examples = suppress_review_signals(
+        list_review_signals_for_analysis(limit=60, max_examples_per_group=5),
+        covered,
+    )
+    qb_tag = question_bank_dedup_cache_tag(active_overrides)
+    prof_key = f"p{int(llm_profile_id)}" if llm_profile_id is not None else "pdef"
+    cache_key = (
+        f"{compute_review_signals_cache_key()}:"
+        f"{_prompt_rule_fingerprint(base_head, active_overrides)}:"
+        f"{qb_tag}:{prof_key}"
+    )
+    return {
+        "system_prompt": base_head,
+        "active_overrides": active_overrides,
+        "discarded_for_filter": discarded_for_filter,
+        "covered": covered,
+        "signals_for_examples": signals_for_examples,
+        "cache_key": cache_key,
+    }
+
+
+def _analysis_response_from_cache(
+    ctx: dict[str, Any], cached: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    if cached is None:
+        return None
+    payload = _finalize_analysis_response(
+        cached["result"],
+        ctx["system_prompt"],
+        ctx["active_overrides"],
+        ctx["discarded_for_filter"],
+    )
+    payload = enrich_analysis_payload_with_supporting_examples(
+        payload, ctx["signals_for_examples"]
+    )
+    return {
+        "cached": True,
+        "cache_key": ctx["cache_key"],
+        "generated_at": cached["created_at"],
+        "model": cached["model"],
+        **payload,
+    }
+
+
+@app.get("/api/admin/training-quality/analysis")
+def api_admin_training_quality_analysis(
+    llm_profile_id: int | None = Query(default=None),
+    _: dict = Depends(_require_admin),
+) -> dict:
+    """Cache-only read of the latest analyzer output for the current state.
+
+    Never calls the LLM. Returns 404 if there is no cache entry yet — the
+    frontend should follow up with POST ``/analysis/run``. This split lets
+    the LLM-spawning path stay rate-limited without penalizing reviewers
+    who just want to view the most recent suggestions.
+    """
+    ctx = _build_analysis_context(llm_profile_id)
+    cached = get_prompt_analysis_cache(ctx["cache_key"], ANALYZER_CACHE_TTL_HOURS)
+    response = _analysis_response_from_cache(ctx, cached)
+    if response is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "no_cached_analysis",
+                "cache_key": ctx["cache_key"],
+                "hint": "POST /api/admin/training-quality/analysis/run to populate.",
+            },
+        )
+    return response
+
+
+@app.post("/api/admin/training-quality/analysis/run")
+@limiter.limit("3/5minute")
+async def api_admin_training_quality_analysis_run(
+    request: Request,
+    llm_profile_id: int | None = Query(default=None),
+    _: dict = Depends(_require_admin),
+) -> dict:
+    """Trigger a fresh analyzer LLM run (or return the live cache entry)."""
+    from .llm_profiles import resolve_llm_profile_for_task
+    from .prompt_analyzer import analyze_pending_async  # local import: heavy module
+
+    ctx = _build_analysis_context(llm_profile_id)
+    cached = get_prompt_analysis_cache(ctx["cache_key"], ANALYZER_CACHE_TTL_HOURS)
     if cached is not None:
-        return {
-            "cached": True,
-            "cache_key": cache_key,
-            "generated_at": cached["created_at"],
-            "model": cached["model"],
-            **cached["result"],
-        }
-    grouped = list_pending_grouped(limit_per_group=5)
-    groups = grouped.get("groups", [])
+        cached_response = _analysis_response_from_cache(ctx, cached)
+        if cached_response is not None:
+            return cached_response
+
+    groups = ctx["signals_for_examples"].get("groups", [])
+    _tq_log.debug(
+        "analysis run signals total=%s groups=%d covered=%d",
+        ctx["signals_for_examples"].get("total_signals"),
+        len(groups),
+        len(ctx["covered"]),
+    )
     if not groups:
         return {
             "cached": False,
-            "cache_key": cache_key,
+            "cache_key": ctx["cache_key"],
             "groups": [],
             "rag_suggestions": [],
+            "duplicate_suggestions_hidden": 0,
+            "discarded_suggestions_hidden": 0,
+            "question_claim_hidden": 0,
+            "hidden_suggestions": [],
             "model": None,
-            "generated_at": grouped.get("generated_at"),
+            "generated_at": ctx["signals_for_examples"].get("generated_at"),
         }
+    discarded_for_llm = ctx["discarded_for_filter"][:ANALYZER_DISCARD_PROMPT_LIMIT]
+    _analyzer_budget = (
+        float(ANALYZER_MAX_LLM_ATTEMPTS) * float(ANALYZER_LLM_TIMEOUT_SECONDS)
+        + float(ANALYZER_REPAIR_BUDGET_SECONDS)
+        + 60.0
+    )
+    _analyzer_effective_deadline = max(
+        float(ANALYZER_DEADLINE_SECONDS),
+        _analyzer_budget,
+    )
     try:
-        result = await analyze_pending_async(groups, SYSTEM_PROMPT)
+        _obs_log.info(
+            "analyzer_llm_start groups=%s deadline_s=%s (env=%s min_budget=%s)",
+            len(groups),
+            _analyzer_effective_deadline,
+            ANALYZER_DEADLINE_SECONDS,
+            _analyzer_budget,
+        )
+        resolved = resolve_llm_profile_for_task(
+            "analyzer", profile_id=llm_profile_id
+        )
+        result = await asyncio.wait_for(
+            analyze_pending_async(
+                groups,
+                ctx["system_prompt"],
+                discarded=discarded_for_llm,
+                llm_profile=resolved,
+            ),
+            timeout=_analyzer_effective_deadline,
+        )
+    except asyncio.TimeoutError as exc:
+        _obs_log.warning(
+            "prompt analyzer exceeded deadline_s=%s",
+            _analyzer_effective_deadline,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"Analyzer timed out after {_analyzer_effective_deadline:.0f}s "
+                f"(allows {ANALYZER_MAX_LLM_ATTEMPTS}x{ANALYZER_LLM_TIMEOUT_SECONDS}s LLM budget). "
+                "Retry shortly; raise ANALYZER_LLM_TIMEOUT_SECONDS or ANALYZER_DEADLINE_SECONDS only "
+                "if NVIDIA responses are consistently slow."
+            ),
+        ) from exc
     except Exception as exc:
         _obs_log.exception("prompt analyzer failed")
         raise HTTPException(status_code=502, detail=f"Analyzer failed: {exc}") from exc
     payload = result.to_dict()
-    put_prompt_analysis_cache(cache_key, payload, result.model)
-    fresh = get_prompt_analysis_cache(cache_key, ANALYZER_CACHE_TTL_HOURS)
+    put_prompt_analysis_cache(ctx["cache_key"], payload, result.model)
+    try:
+        record_suggestion_affected_from_analysis_payload(payload, ctx["cache_key"])
+    except Exception:
+        _obs_log.exception("record suggestion_affected events failed")
+    fresh = get_prompt_analysis_cache(ctx["cache_key"], ANALYZER_CACHE_TTL_HOURS)
+    filtered_payload = _finalize_analysis_response(
+        payload, ctx["system_prompt"], ctx["active_overrides"], ctx["discarded_for_filter"]
+    )
+    filtered_payload = enrich_analysis_payload_with_supporting_examples(
+        filtered_payload, ctx["signals_for_examples"]
+    )
     return {
         "cached": False,
-        "cache_key": cache_key,
+        "cache_key": ctx["cache_key"],
         "generated_at": fresh["created_at"] if fresh else None,
         "model": result.model,
-        **payload,
+        **filtered_payload,
     }
+
+
+class PromptSuggestionDiscardRequest(BaseModel):
+    error_type: str = ""
+    suggested_change: str
+    reason: str = ""
+    affected_example_ids: list[int] = []
+
+
+def _llm_profile_422_detail(exc: ValueError) -> str:
+    """Map internal ValueError codes to a short, actionable HTTP message."""
+    code = str(exc)
+    friendly: dict[str, str] = {
+        "inline_llm_keys_disabled": (
+            "inline_llm_keys_disabled — Pasted keys are disabled. Set LLM_PROFILES_SECRET in the "
+            "backend .env and restart, or set ALLOW_INLINE_LLM_KEYS=true; or leave the API key "
+            "empty and use Env alias (e.g. LLM_API_KEY). If you set ALLOW_INLINE_LLM_KEYS=false, "
+            "only env alias works."
+        ),
+        "missing_credentials": (
+            "missing_credentials — Set Env alias (e.g. LLM_API_KEY) or paste a key when "
+            "LLM_PROFILES_SECRET (or ALLOW_INLINE_LLM_KEYS=true) allows inline storage."
+        ),
+        "invalid_env_alias": (
+            "invalid_env_alias — Use a name like LLM_API_KEY (letters, digits, underscores)."
+        ),
+    }
+    return friendly.get(code, code)
+
+
+class LlmProfileCreateRequest(BaseModel):
+    name: str
+    base_url: str
+    default_model: str
+    provider: str = "openai_compatible"
+    api_key: str | None = None
+    env_alias: str | None = None
+
+
+class LlmProfilePatchRequest(BaseModel):
+    name: str | None = None
+    base_url: str | None = None
+    default_model: str | None = None
+    disabled: bool | None = None
+    api_key: str | None = None
+    env_alias: str | None = None
+    clear_env_alias: bool = False
+
+
+class LlmTaskDefaultsRequest(BaseModel):
+    """Map task name -> profile id (null clears)."""
+
+    defaults: dict[str, int | None]
+
+
+@app.get("/api/admin/llm/capabilities")
+def api_admin_llm_capabilities(_: dict = Depends(_require_admin)) -> dict:
+    """Whether the server accepts pasted API keys on profile create/patch."""
+    return {"allow_inline_api_keys": bool(ALLOW_INLINE_LLM_KEYS)}
+
+
+@app.get("/api/admin/llm/profiles")
+def api_admin_llm_profiles_list(
+    include_disabled: int = Query(default=0, ge=0, le=1),
+    _: dict = Depends(_require_admin),
+) -> dict:
+    rows = list_llm_model_profiles(include_disabled=bool(include_disabled))
+    return {"profiles": rows}
+
+
+@app.post("/api/admin/llm/profiles")
+def api_admin_llm_profiles_create(
+    req: LlmProfileCreateRequest,
+    _: dict = Depends(_require_admin),
+) -> dict:
+    try:
+        row = create_llm_model_profile(
+            name=req.name,
+            base_url=req.base_url,
+            default_model=req.default_model,
+            provider=req.provider,
+            api_key_plain=req.api_key,
+            env_alias=req.env_alias,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=_llm_profile_422_detail(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"profile": row}
+
+
+@app.patch("/api/admin/llm/profiles/{profile_id}")
+def api_admin_llm_profiles_patch(
+    profile_id: int,
+    req: LlmProfilePatchRequest,
+    _: dict = Depends(_require_admin),
+) -> dict:
+    try:
+        row = update_llm_model_profile(
+            profile_id,
+            name=req.name,
+            base_url=req.base_url,
+            default_model=req.default_model,
+            disabled=req.disabled,
+            api_key_plain=req.api_key,
+            env_alias=req.env_alias,
+            clear_env_alias=req.clear_env_alias,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=_llm_profile_422_detail(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not row:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {"profile": row}
+
+
+@app.delete("/api/admin/llm/profiles/{profile_id}")
+def api_admin_llm_profiles_delete(
+    profile_id: int,
+    _: dict = Depends(_require_admin),
+) -> dict:
+    ok = delete_llm_model_profile(profile_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {"ok": True}
+
+
+@app.get("/api/admin/llm/task-defaults")
+def api_admin_llm_task_defaults_get(_: dict = Depends(_require_admin)) -> dict:
+    return {"defaults": list_llm_task_defaults()}
+
+
+@app.put("/api/admin/llm/task-defaults")
+def api_admin_llm_task_defaults_put(
+    req: LlmTaskDefaultsRequest,
+    _: dict = Depends(_require_admin),
+) -> dict:
+    for task, pid in req.defaults.items():
+        set_llm_task_default(task, pid)
+    return {"defaults": list_llm_task_defaults()}
+
+
+@app.post("/api/admin/llm/profiles/{profile_id}/probe")
+async def api_admin_llm_profile_probe(
+    profile_id: int,
+    request: Request,
+    mode_query: str | None = Query(default=None),
+    _: dict = Depends(_require_admin),
+) -> dict:
+    from .llm_profile_diag import run_profile_diagnostic
+    from .llm_profiles import resolve_llm_profile_for_task
+
+    if not get_llm_model_profile(int(profile_id)):
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    m = "quick"
+    try:
+        raw_bytes = await request.body()
+        if raw_bytes.strip():
+            payload = json.loads(raw_bytes.decode("utf-8"))
+            if isinstance(payload, dict):
+                raw = str(payload.get("mode", "")).strip().lower()
+                if raw in {"quick", "full"}:
+                    m = raw
+    except Exception:
+        pass
+    if m == "quick" and mode_query is not None and str(mode_query).strip():
+        mq = str(mode_query).strip().lower()
+        if mq in {"quick", "full"}:
+            m = mq
+    if m not in {"quick", "full"}:
+        raise HTTPException(
+            status_code=422,
+            detail="mode must be 'quick' or 'full'",
+        )
+
+    if m == "full":
+        try:
+            return await run_profile_diagnostic(int(profile_id))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    try:
+        resolved = resolve_llm_profile_for_task("chat", profile_id=int(profile_id))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        reply = await achat(
+            [{"role": "user", "content": "Reply with exactly: ok"}],
+            max_tokens=256,
+            timeout=float(LLM_HEALTH_TIMEOUT_SECONDS),
+            max_retries=0,
+            resolved=resolved,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "mode": "quick",
+        "snippet": (reply or "").strip()[:80],
+        "base_url": resolved.base_url,
+        "model": resolved.default_model,
+    }
+
+
+@app.get("/api/admin/training-quality/question-bank")
+def api_admin_training_quality_question_bank(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    q: str | None = Query(default=None),
+    only_covered: bool = Query(default=False),
+    only_with_override: bool = Query(default=False),
+    only_recent_hours: int | None = Query(default=None),
+    _: dict = Depends(_require_admin),
+) -> dict:
+    rows, total = list_question_bank_rows(
+        limit=limit,
+        offset=offset,
+        q=q,
+        only_covered=only_covered,
+        only_with_override=only_with_override,
+        only_recent_hours=only_recent_hours,
+    )
+    return {"rows": rows, "total": total, "offset": offset, "limit": limit}
+
+
+@app.post("/api/admin/training-quality/suggestions/discard")
+def api_admin_training_quality_suggestion_discard(
+    req: PromptSuggestionDiscardRequest,
+    user: dict = Depends(_require_admin),
+) -> dict:
+    """Record an analyzer suggestion the reviewer chose to discard.
+
+    The next analyzer run reads recent rejections and includes them in the
+    prompt so the LLM avoids re-suggesting equivalent rules.
+    """
+    if not req.suggested_change.strip():
+        raise HTTPException(status_code=400, detail="suggested_change is required")
+    record = record_prompt_suggestion_decision(
+        error_type=req.error_type,
+        suggested_change=req.suggested_change,
+        decision="rejected",
+        reason=req.reason,
+        affected_example_ids=req.affected_example_ids,
+        created_by_user_id=user.get("id"),
+    )
+    return {"decision": record}
+
+
+class PromptOverrideReplayRequest(BaseModel):
+    max_inputs: int = 6
+    paraphrases_per_input: int = 3
+    llm_profile_id: int | None = None
+
+
+def _replay_preflight(
+    override_id: int, req: PromptOverrideReplayRequest
+) -> tuple[dict, int, int, int]:
+    """Shared pre-flight checks for both POST and SSE replay handlers.
+
+    Returns ``(override_record, max_inputs, paraphrases, predicted_calls)``.
+    Raises ``HTTPException`` on 404 / 429.
+    """
+    from .llm import rpm_status
+    from .prompt_replay import predicted_replay_call_count
+
+    record = get_prompt_override(int(override_id))
+    if not record:
+        raise HTTPException(status_code=404, detail="Override not found")
+    max_inputs = max(1, min(20, int(req.max_inputs or 0) or 6))
+    paraphrases = max(0, min(5, int(req.paraphrases_per_input or 0)))
+
+    affected = list(record.get("affected_example_ids") or [])
+    effective_inputs = min(max_inputs, len(affected)) if affected else 0
+    predicted_calls = predicted_replay_call_count(effective_inputs, paraphrases)
+    status = rpm_status()
+    remaining = max(0, int(status.get("budget", 0)) - int(status.get("used_last_60s", 0)))
+    if predicted_calls > 0 and remaining < predicted_calls:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Replay would issue ~{predicted_calls} LLM calls but only "
+                f"{remaining} slots remain in the current 60s window. "
+                "Wait a moment and retry."
+            ),
+        )
+    return record, max_inputs, paraphrases, predicted_calls
+
+
+@app.post("/api/admin/training-quality/overrides/{override_id}/replay")
+@limiter.limit("1/5minute")
+async def api_admin_training_quality_override_replay(
+    request: Request,
+    override_id: int,
+    req: PromptOverrideReplayRequest,
+    _: dict = Depends(_require_admin),
+) -> dict:
+    """Run a mini-replay of an active override on its affected examples plus
+    paraphrases of each. Each replay item is also persisted into
+    `training_examples` (source_type='prompt_replay') so it shows up in the
+    review queue and the reviewer can spot regressions.
+
+    Pre-flight: rejects with 429 if the predicted LLM call count would
+    exceed the remaining NVIDIA RPM budget. The handler itself is also
+    rate-limited per user to one run every 5 minutes.
+    """
+    from .llm_profiles import resolve_llm_profile_for_task
+    from .prompt_replay import replay_for_override  # local import: heavy module
+
+    _record, max_inputs, paraphrases, _predicted = _replay_preflight(override_id, req)
+    try:
+        summary = await replay_for_override(
+            int(override_id),
+            max_inputs=max_inputs,
+            paraphrases_per_input=paraphrases,
+            llm_profile=resolve_llm_profile_for_task(
+                "replay", profile_id=req.llm_profile_id
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        _obs_log.exception("replay_for_override failed")
+        raise HTTPException(status_code=502, detail=f"Replay failed: {exc}") from exc
+
+    set_prompt_override_replay_summary(
+        int(override_id),
+        {
+            "total_original": summary.total_original,
+            "passed_original": summary.passed_original,
+            "total_paraphrases": summary.total_paraphrases,
+            "passed_paraphrases": summary.passed_paraphrases,
+            "examples_logged": summary.examples_logged,
+            "ran_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    return {"summary": summary.to_dict()}
+
+
+@app.post("/api/admin/training-quality/overrides/{override_id}/replay/stream")
+@limiter.limit("1/5minute")
+async def api_admin_training_quality_override_replay_stream(
+    request: Request,
+    override_id: int,
+    req: PromptOverrideReplayRequest,
+    _: dict = Depends(_require_admin),
+) -> StreamingResponse:
+    """SSE variant of the replay endpoint.
+
+    Emits one ``data: {...json...}\\n\\n`` event per progress update from
+    :func:`prompt_replay.stream_replay_for_override` so the admin UI can
+    show per-question progress instead of waiting on a single blocking
+    POST. Final ``summary`` event is also persisted on the override row
+    so subsequent ``/overrides`` list calls show the same numbers.
+    """
+    from .llm_profiles import resolve_llm_profile_for_task
+    from .prompt_replay import stream_replay_for_override  # heavy module
+
+    _record, max_inputs, paraphrases, _predicted = _replay_preflight(override_id, req)
+    profile = resolve_llm_profile_for_task("replay", profile_id=req.llm_profile_id)
+
+    async def _event_source():
+        try:
+            async for event in stream_replay_for_override(
+                int(override_id),
+                max_inputs=max_inputs,
+                paraphrases_per_input=paraphrases,
+                llm_profile=profile,
+            ):
+                if event.get("type") == "summary":
+                    summary = event.get("summary") or {}
+                    try:
+                        set_prompt_override_replay_summary(
+                            int(override_id),
+                            {
+                                "total_original": int(summary.get("total_original") or 0),
+                                "passed_original": int(summary.get("passed_original") or 0),
+                                "total_paraphrases": int(summary.get("total_paraphrases") or 0),
+                                "passed_paraphrases": int(summary.get("passed_paraphrases") or 0),
+                                "examples_logged": int(summary.get("examples_logged") or 0),
+                                "ran_at": datetime.now(timezone.utc).isoformat(),
+                            },
+                        )
+                    except Exception:
+                        _obs_log.exception(
+                            "set_prompt_override_replay_summary failed (override=%s)",
+                            override_id,
+                        )
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except ValueError as exc:
+            yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
+        except Exception as exc:
+            _obs_log.exception("stream_replay_for_override failed")
+            yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        _event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/admin/training-examples/{example_id}")
@@ -2176,15 +4038,87 @@ def api_admin_training_bulk_review(
     return {"ok": True, **result}
 
 
+def _normalize_export_correction_types(raw: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        ct = str(item).strip().lower()
+        if ct == "corrected":
+            ct = "edited"
+        if not ct or ct in seen:
+            continue
+        if ct not in ALLOWED_CORRECTION_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid correction_type {ct!r}. Allowed: {', '.join(sorted(ALLOWED_CORRECTION_TYPES))}",
+            )
+        seen.add(ct)
+        out.append(ct)
+    if not out:
+        raise HTTPException(status_code=400, detail="At least one correction_type is required.")
+    return out
+
+
 @app.get("/api/admin/training-examples/export")
 def api_admin_training_examples_export(
     correction_types: str = Query(default="approved,edited"),
     _: dict = Depends(_require_admin),
 ) -> Response:
-    include = [x.strip() for x in correction_types.split(",") if x.strip()]
+    include = [x.strip().lower() for x in correction_types.split(",") if x.strip()]
     if not include:
         include = ["approved", "edited"]
+    try:
+        include = _normalize_export_correction_types(include)
+    except HTTPException:
+        raise
     data = export_training_examples_jsonl(include_correction_types=include)
+    return Response(content=data, media_type="application/x-ndjson")
+
+
+@app.post("/api/admin/training-examples/export")
+def api_admin_training_examples_export_post(
+    body: AdminTrainingExamplesExportRequest,
+    _: dict = Depends(_require_admin),
+) -> Response:
+    try:
+        cts = _normalize_export_correction_types(body.correction_types)
+    except HTTPException:
+        raise
+    id_list = body.ids
+    if id_list is not None:
+        clean_ids: list[int] = []
+        seen_i: set[int] = set()
+        for raw in id_list:
+            try:
+                i = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if i <= 0 or i in seen_i:
+                continue
+            seen_i.add(i)
+            clean_ids.append(i)
+        if len(clean_ids) > TRAINING_EXPORT_MAX_IDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Too many ids (max {TRAINING_EXPORT_MAX_IDS}).",
+            )
+        id_list = clean_ids or None
+    if body.id_min is not None and body.id_max is not None and body.id_min > body.id_max:
+        raise HTTPException(status_code=400, detail="id_min must be <= id_max.")
+    ca = (body.created_after or "").strip() or None
+    cb = (body.created_before or "").strip() or None
+    try:
+        data = export_training_examples_jsonl(
+            include_correction_types=cts,
+            example_ids=id_list,
+            id_min=body.id_min,
+            id_max=body.id_max,
+            created_after=ca,
+            created_before=cb,
+            include_actual_output=bool(body.include_actual_output),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return Response(content=data, media_type="application/x-ndjson")
 
 

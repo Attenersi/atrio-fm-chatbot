@@ -18,7 +18,13 @@ backend/data/*.backup_*.jsonl
 backend/data/*.pre_user_replace_backup.jsonl
 backend/tickets.backup_*.db
 
-# Stray DB files if backend is started from the wrong CWD.
+# Local SQLite operational DB (tickets, users, LLM profile metadata). Do not commit on public repos.
+backend/tickets.db
+backend/tickets.db-wal
+backend/tickets.db-shm
+/tickets.db
+/tickets.db-wal
+/tickets.db-shm
 
 # Env
 .env
@@ -36,3 +42,4 @@ frontend/.next-dev/
 
 # Local virtualenv
 venv/
+backend/.venv/

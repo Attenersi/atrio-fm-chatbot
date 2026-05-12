@@ -1,0 +1,33 @@
+# Optional local hot-reload. Copy to `docker-compose.override.yml` (same directory as
+# `docker-compose.yml`); Compose merges it automatically.
+#
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# Then: docker compose up --build
+
+services:
+  backend:
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+        "--reload-dir",
+        "/app/app",
+      ]
+    volumes:
+      - ./backend/app:/app/app
+
+  frontend:
+    command: ["npm", "run", "dev", "--", "-p", "3000", "-H", "0.0.0.0"]
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next

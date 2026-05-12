@@ -1,0 +1,289 @@
+{
+  "title": "Help — Atrio FM Chatbot",
+  "subtitleBeforeRepo": "Administrator and user guide. For the full Polish handbook, see",
+  "subtitleAfterRepo": "in the repository.",
+  "footer": "In-app help · Repository:",
+  "tabOrder": [
+    "overview",
+    "chat",
+    "dashboard",
+    "gaps",
+    "documents",
+    "training",
+    "quality"
+  ],
+  "tabs": {
+    "overview": "Overview",
+    "chat": "Chat",
+    "dashboard": "Tickets",
+    "gaps": "Knowledge gaps",
+    "documents": "Documents",
+    "training": "Test Cases",
+    "quality": "System Prompt"
+  },
+  "overview": {
+    "intro": "Atrio FM Chatbot helps tenants and staff with building questions and service requests. Admins manage tickets, users, knowledge documents, and quality improvements.",
+    "cards": [
+      {
+        "title": "Chat",
+        "body": "Ask questions; the bot may create a service ticket when it detects a real issue."
+      },
+      {
+        "title": "Admin",
+        "body": "Tickets, knowledge gaps, users, documents, training data, and quality tools."
+      },
+      {
+        "title": "Quality",
+        "body": "Group errors, run evaluations, apply safe prompt tweaks without code."
+      }
+    ],
+    "whereHeading": "Where things live",
+    "whereTable": {
+      "headers": ["Route / tab", "Purpose", "Who"],
+      "rows": [
+        ["/chat", "Talk to the FM assistant", "Signed-in users"],
+        ["/dashboard", "Ticket list and filters", "Signed-in users"],
+        [
+          "/admin/tickets",
+          "Resolution notes, classification overrides",
+          "Admin"
+        ],
+        [
+          "/admin/knowledge/gaps",
+          "Questions the bot could not answer from docs",
+          "Admin"
+        ],
+        ["/admin/users", "Accounts and roles", "Admin"],
+        [
+          "/admin/knowledge/documents",
+          "Knowledge base files and reindex",
+          "Admin"
+        ],
+        [
+          "/admin/rag-eval",
+          "Batch model answer evaluation jobs",
+          "Admin"
+        ],
+        ["/admin/training", "Review and export training examples", "Admin"],
+        [
+          "/admin/training-quality",
+          "Edit the base system prompt for chat",
+          "Admin"
+        ]
+      ]
+    },
+    "calloutSignIn": {
+      "tone": "info",
+      "title": "First-time admin sign-in",
+      "body": "Open /admin/login (or use the main sign-in if your account is admin). Default username is often admin; password is set by your technical contact."
+    },
+    "calloutDaily": {
+      "tone": "warn",
+      "title": "Daily habit",
+      "body": "Check Knowledge gaps regularly. Each gap is a missing answer in your documentation."
+    }
+  },
+  "chat": {
+    "routeLine": "Route:",
+    "howHeading": "How to chat",
+    "steps": [
+      "Open Chat from the sidebar.",
+      "Type your question or issue at the bottom.",
+      "Press Enter or Send.",
+      "Read the reply, category, priority, and whether a ticket was created."
+    ],
+    "whenTicketHeading": "When the bot usually creates a ticket",
+    "cards": [
+      {
+        "title": "Creates a ticket",
+        "body": "Physical fault, safety risk, HVAC / electrical / plumbing / elevators, clear repair need."
+      },
+      {
+        "title": "Often no ticket",
+        "body": "Hours, policies, “where is…”, thank-yous, status of an existing ticket (informational only)."
+      }
+    ],
+    "prioritiesHeading": "Priorities (short)",
+    "prioritiesTable": {
+      "headers": ["Priority", "Use when", "Example"],
+      "rows": [
+        [
+          "URGENT",
+          "Immediate danger to people or property",
+          "Fire, gas smell, flooding electrical hazard"
+        ],
+        [
+          "HIGH",
+          "Serious fault, same-day action",
+          "No heat in winter, server room cooling down"
+        ],
+        [
+          "NORMAL",
+          "Annoying but not critical",
+          "Stuck door, broken light in corridor"
+        ],
+        ["LOW", "Minor convenience", "Cosmetic fix, furniture swap"]
+      ]
+    },
+    "createAnywayHeading": "“Create ticket anyway”",
+    "createAnywayBody": "If the bot answered but you still need a ticket, use the button under the message (manual ticket).",
+    "newChatHeading": "New chat",
+    "newChatBody": "Use New chat when you change topic. The bot remembers recent messages in the active thread.",
+    "calloutRateLimit": {
+      "tone": "info",
+      "title": "Rate limit",
+      "body": "Roughly 30 chat messages per minute per user. If you see “too many requests”, wait a minute."
+    },
+    "calloutDoNot": {
+      "tone": "danger",
+      "title": "Do not",
+      "list": [
+        "Rely on chat alone for life-safety emergencies — call your emergency line.",
+        "Spam the same question; it confuses context.",
+        "Assume a ticket exists without checking the dashboard."
+      ]
+    }
+  },
+  "dashboard": {
+    "routeLine": "Route:",
+    "intro": "Admins see all tickets; regular users see only their own. Use filters for category, priority, and status.",
+    "changeStatusHeading": "Change ticket status",
+    "changeStatusSteps": [
+      "Open a ticket row or detail.",
+      "Pick status: Open → In Progress → Resolved when work is confirmed."
+    ],
+    "statusTable": {
+      "headers": ["Status", "Meaning"],
+      "rows": [
+        ["Open", "New, not yet picked up"],
+        ["In Progress", "Someone is working on it"],
+        ["Resolved", "Fixed or closed with confirmation"]
+      ]
+    },
+    "resolutionHeading": "Admin: resolution notes",
+    "resolutionBody": "Under /admin/tickets, add resolution notes: what was done, parts, cost, time spent.",
+    "overrideHeading": "Admin: classification override",
+    "overrideBody": "If the bot misclassified a ticket, use Classification override to fix category, priority, or department. This is logged and feeds training data.",
+    "exportBody": "Export CSV exports what you currently see after filters.",
+    "calloutDoNot": {
+      "tone": "warn",
+      "title": "Do not",
+      "list": [
+        "Mark Resolved without confirmation from the technician.",
+        "Ignore URGENT tickets in the queue."
+      ]
+    }
+  },
+  "gaps": {
+    "routeLine": "Route:",
+    "intro": "Gaps are real user questions where the bot could not ground an answer in your FM documents. Closing a gap improves answers for everyone.",
+    "closeHeading": "Close a gap (typical flow)",
+    "steps": [
+      "Open the gap (or its detail page).",
+      "Set Doc name, e.g. building_hours.md.",
+      "Write Content in English (the assistant runs in English).",
+      "Choose append (add to file) or overwrite (replace entire file).",
+      "Enable Auto-reindex so the bot picks up the text immediately.",
+      "Click Resolve gap."
+    ],
+    "calloutTip": {
+      "tone": "info",
+      "title": "Tip",
+      "body": "Prefer append to existing topic files unless you are sure overwrite is safe."
+    },
+    "calloutDoNot": {
+      "tone": "danger",
+      "title": "Do not",
+      "list": [
+        "Skip Auto-reindex and expect instant better answers.",
+        "Overwrite a large file without reading what is already there."
+      ]
+    }
+  },
+  "documents": {
+    "routeLine": "Route:",
+    "intro": "Markdown / text files in the FM corpus power retrieval. After any edit, run Reindex so embeddings match the files.",
+    "commonHeading": "Common doc files",
+    "filesTable": {
+      "headers": ["File", "Topic"],
+      "rows": [
+        ["01_building_general_info.md", "General building info"],
+        ["02_hvac_systems.md", "HVAC"],
+        ["03_electrical_systems.md", "Electrical"],
+        ["04_plumbing_water.md", "Plumbing / water"],
+        ["05_fire_safety_emergency.md", "Fire & emergency"],
+        ["06_security_access.md", "Security & access"],
+        ["07_parking_transport.md", "Parking & transport"],
+        ["08_it_network.md", "IT & network"],
+        ["09_elevators.md", "Elevators"],
+        ["10_cleaning_waste.md", "Cleaning & waste"],
+        ["11_meeting_rooms_spaces.md", "Meeting rooms"],
+        ["12_building_rules_policies.md", "Policies"]
+      ]
+    },
+    "uploadHeading": "Upload",
+    "uploadBody": "Supported: .txt, .md, .csv, .pdf, .docx. Use Overwrite and Auto-reindex as needed.",
+    "calloutMistake": {
+      "tone": "warn",
+      "title": "Most common mistake",
+      "body": "Editing a document and forgetting Reindex — users still get old answers until you reindex."
+    }
+  },
+  "training": {
+    "routeLine": "Route:",
+    "intro": "Review examples produced from chat/tests. Approving good rows and fixing bad ones builds a high-quality dataset for future model work.",
+    "filtersTable": {
+      "headers": ["Filter", "Meaning"],
+      "rows": [
+        ["pending", "Needs human review"],
+        ["approved", "Accepted as correct"],
+        ["edited", "You corrected ideal output"],
+        ["rejected", "Not suitable for training"]
+      ]
+    },
+    "keyboardBody": "Keyboard: ← → navigate, A approve, R reject.",
+    "calloutDoNot": {
+      "tone": "warn",
+      "title": "Do not",
+      "body": "Approve rows without checking category and priority. Bulk-reject pending without reading."
+    }
+  },
+  "quality": {
+    "routeLine": "Route:",
+    "intro": "Mismatch groups show error patterns. Run eval runs a batch test (~80 cases). Analyze pending asks the analyzer model for suggested prompt additions (cached, rate-limited). Active overrides are live extra rules appended to the assistant instructions.",
+    "workflowHeading": "Suggested workflow",
+    "workflowSteps": [
+      "Run eval to capture a baseline score.",
+      "Review mismatch groups so you know what is failing.",
+      "Run Analyze pending; read each suggestion carefully.",
+      "Apply only changes you understand; edit text in the modal if needed.",
+      "Run eval again later and compare accuracy; rollback if metrics worsen."
+    ],
+    "constraintsTable": {
+      "headers": ["Constraint", "What to do"],
+      "rows": [
+        [
+          "Only one eval at a time",
+          "Wait for running to finish before starting another"
+        ],
+        [
+          "Limited active overrides",
+          "Rollback old rules before adding new ones if you hit the cap"
+        ],
+        [
+          "Fresh eval may be required before apply",
+          "Run eval if the UI says baseline is too old"
+        ]
+      ]
+    },
+    "calloutDoNot": {
+      "tone": "danger",
+      "title": "Do not",
+      "list": [
+        "Apply overrides you do not understand.",
+        "Ignore accuracy deltas after a change.",
+        "Run heavy eval repeatedly during peak chat hours if your API quota is tight."
+      ]
+    }
+  }
+}

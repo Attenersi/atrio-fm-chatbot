@@ -1,0 +1,289 @@
+{
+  "title": "Help — Atrio FM-chatbot",
+  "subtitleBeforeRepo": "Handleiding voor beheerders en gebruikers. Voor het volledige Poolse handboek, zie",
+  "subtitleAfterRepo": "in de repository.",
+  "footer": "Help in de app · Repository:",
+  "tabOrder": [
+    "overview",
+    "chat",
+    "dashboard",
+    "gaps",
+    "documents",
+    "training",
+    "quality"
+  ],
+  "tabs": {
+    "overview": "Overzicht",
+    "chat": "Chat",
+    "dashboard": "Tickets",
+    "gaps": "Kennislacunes",
+    "documents": "Documenten",
+    "training": "Testcases",
+    "quality": "Systeemprompt"
+  },
+  "overview": {
+    "intro": "Atrio FM-chatbot helpt huurders en medewerkers met gebouwvragen en servicemeldingen. Beheerders beheren tickets, gebruikers, kennisdocumenten en kwaliteitsverbeteringen.",
+    "cards": [
+      {
+        "title": "Chat",
+        "body": "Stel vragen; de bot kan een serviceticket aanmaken als er een echte storing is."
+      },
+      {
+        "title": "Admin",
+        "body": "Tickets, kennislacunes, gebruikers, documenten, trainingsdata en kwaliteitstools."
+      },
+      {
+        "title": "Kwaliteit",
+        "body": "Fouten groeperen, evaluaties draaien, veilige promptaanpassingen zonder code."
+      }
+    ],
+    "whereHeading": "Waar vind je wat",
+    "whereTable": {
+      "headers": ["Route / tab", "Doel", "Wie"],
+      "rows": [
+        ["/chat", "Praat met de FM-assistent", "Ingelogde gebruikers"],
+        ["/dashboard", "Ticketlijst en filters", "Ingelogde gebruikers"],
+        [
+          "/admin/tickets",
+          "Afhandelnotities, classificatie-overschrijvingen",
+          "Admin"
+        ],
+        [
+          "/admin/knowledge/gaps",
+          "Vragen die de bot niet uit documenten kon beantwoorden",
+          "Admin"
+        ],
+        ["/admin/users", "Accounts en rollen", "Admin"],
+        [
+          "/admin/knowledge/documents",
+          "Kennisbestand en herindexeren",
+          "Admin"
+        ],
+        [
+          "/admin/rag-eval",
+          "Batch evaluaties van modelantwoorden",
+          "Admin"
+        ],
+        ["/admin/training", "Trainingvoorbeelden beoordelen en exporteren", "Admin"],
+        [
+          "/admin/training-quality",
+          "Basissysteemprompt voor chat bewerken",
+          "Admin"
+        ]
+      ]
+    },
+    "calloutSignIn": {
+      "tone": "info",
+      "title": "Eerste keer inloggen als admin",
+      "body": "Open /admin/login (of gebruik de normale login als je account admin is). De standaardgebruikersnaam is vaak admin; het wachtwoord krijg je van je technisch contact."
+    },
+    "calloutDaily": {
+      "tone": "warn",
+      "title": "Dagelijkse gewoonte",
+      "body": "Controleer Kennislacunes regelmatig. Elke lacune is een ontbrekend antwoord in je documentatie."
+    }
+  },
+  "chat": {
+    "routeLine": "Route:",
+    "howHeading": "Chatten",
+    "steps": [
+      "Open Chat in de zijbalk.",
+      "Typ je vraag of probleem onderaan.",
+      "Druk op Enter of Verzenden.",
+      "Lees het antwoord, categorie, prioriteit en of er een ticket is aangemaakt."
+    ],
+    "whenTicketHeading": "Wanneer de bot meestal een ticket aanmaakt",
+    "cards": [
+      {
+        "title": "Maakt een ticket",
+        "body": "Fysieke storing, veiligheidsrisico, HVAC / elektrisch / loodgieterswerk / liften, duidelijke reparatiebehoefte."
+      },
+      {
+        "title": "Vaak geen ticket",
+        "body": "Openingstijden, beleid, “waar is…”, bedankjes, status van een bestaand ticket (alleen informatief)."
+      }
+    ],
+    "prioritiesHeading": "Prioriteiten (kort)",
+    "prioritiesTable": {
+      "headers": ["Prioriteit", "Gebruik wanneer", "Voorbeeld"],
+      "rows": [
+        [
+          "URGENT",
+          "Direct gevaar voor mensen of eigendom",
+          "Brand, gaslucht, water- of elektrisch gevaar"
+        ],
+        [
+          "HIGH",
+          "Ernstige storing, actie dezelfde dag",
+          "Geen verwarming in de winter, koeling serverruimte weg"
+        ],
+        [
+          "NORMAL",
+          "Lastig maar niet kritiek",
+          "Vastzittende deur, kapotte lamp in gang"
+        ],
+        ["LOW", "Kleine overlast", "Cosmetische reparatie, meubelruil"]
+      ]
+    },
+    "createAnywayHeading": "“Toch ticket aanmaken”",
+    "createAnywayBody": "Als de bot antwoordde maar je toch een ticket nodig hebt, gebruik de knop onder het bericht (handmatig ticket).",
+    "newChatHeading": "Nieuwe chat",
+    "newChatBody": "Gebruik Nieuwe chat als je van onderwerp wisselt. De bot onthoudt recente berichten in de actieve thread.",
+    "calloutRateLimit": {
+      "tone": "info",
+      "title": "Limiet",
+      "body": "Ongeveer 30 chatberichten per minuut per gebruiker. Bij “too many requests” even wachten."
+    },
+    "calloutDoNot": {
+      "tone": "danger",
+      "title": "Niet doen",
+      "list": [
+        "Alleen op chat vertrouwen bij levensgevaar — bel je calamiteitenlijn.",
+        "Dezelfde vraag spammen; dat verwart de context.",
+        "Aannemen dat er een ticket is zonder het dashboard te checken."
+      ]
+    }
+  },
+  "dashboard": {
+    "routeLine": "Route:",
+    "intro": "Admins zien alle tickets; gewone gebruikers alleen de eigen. Gebruik filters op categorie, prioriteit en status.",
+    "changeStatusHeading": "Ticketstatus wijzigen",
+    "changeStatusSteps": [
+      "Open een ticketrij of detail.",
+      "Kies status: Open → In behandeling → Afgehandeld als het werk bevestigd is."
+    ],
+    "statusTable": {
+      "headers": ["Status", "Betekenis"],
+      "rows": [
+        ["Open", "Nieuw, nog niet opgepakt"],
+        ["In Progress", "Iemand werkt eraan"],
+        ["Resolved", "Opgelost of afgesloten met bevestiging"]
+      ]
+    },
+    "resolutionHeading": "Admin: afhandelnotities",
+    "resolutionBody": "Onder /admin/tickets voeg je afhandelnotities toe: wat gedaan is, onderdelen, kosten, tijd.",
+    "overrideHeading": "Admin: classificatie-overschrijving",
+    "overrideBody": "Als de bot een ticket verkeerd classificeerde, gebruik Classificatie-overschrijving voor categorie, prioriteit of afdeling. Dit wordt gelogd en voedt trainingsdata.",
+    "exportBody": "CSV-export bevat wat je nu ziet na filters.",
+    "calloutDoNot": {
+      "tone": "warn",
+      "title": "Niet doen",
+      "list": [
+        "Afgehandeld zetten zonder bevestiging van de technicus.",
+        "URGENTE tickets in de wachtrij negeren."
+      ]
+    }
+  },
+  "gaps": {
+    "routeLine": "Route:",
+    "intro": "Lacunes zijn echte gebruikersvragen waarbij de bot geen antwoord uit je FM-documenten kon gronden. Een lacune sluiten verbetert antwoorden voor iedereen.",
+    "closeHeading": "Lacune sluiten (typische flow)",
+    "steps": [
+      "Open de lacune (of de detailpagina).",
+      "Zet Doc name, bijv. building_hours.md.",
+      "Schrijf inhoud in het Engels (de assistent draait in het Engels).",
+      "Kies append (toevoegen aan bestand) of overwrite (heel bestand vervangen).",
+      "Zet Auto-reindex aan zodat de bot de tekst meteen oppikt.",
+      "Klik Resolve gap."
+    ],
+    "calloutTip": {
+      "tone": "info",
+      "title": "Tip",
+      "body": "Liever append naar bestaande topic-bestanden, tenzij overschrijven echt veilig is."
+    },
+    "calloutDoNot": {
+      "tone": "danger",
+      "title": "Niet doen",
+      "list": [
+        "Auto-reindex overslaan en meteen betere antwoorden verwachten.",
+        "Een groot bestand overschrijven zonder te lezen wat er al instaat."
+      ]
+    }
+  },
+  "documents": {
+    "routeLine": "Route:",
+    "intro": "Markdown- / tekstbestanden in de FM-corpus voeden retrieval. Na elke wijziging: Reindex draaien zodat embeddings kloppen.",
+    "commonHeading": "Veelvoorkomende bestanden",
+    "filesTable": {
+      "headers": ["Bestand", "Onderwerp"],
+      "rows": [
+        ["01_building_general_info.md", "Algemene gebouwinformatie"],
+        ["02_hvac_systems.md", "HVAC"],
+        ["03_electrical_systems.md", "Elektrisch"],
+        ["04_plumbing_water.md", "Loodgieterswerk / water"],
+        ["05_fire_safety_emergency.md", "Brand & calamiteiten"],
+        ["06_security_access.md", "Beveiliging & toegang"],
+        ["07_parking_transport.md", "Parkeren & vervoer"],
+        ["08_it_network.md", "IT & netwerk"],
+        ["09_elevators.md", "Liften"],
+        ["10_cleaning_waste.md", "Schoonmaak & afval"],
+        ["11_meeting_rooms_spaces.md", "Vergaderruimtes"],
+        ["12_building_rules_policies.md", "Beleid"]
+      ]
+    },
+    "uploadHeading": "Upload",
+    "uploadBody": "Ondersteund: .txt, .md, .csv, .pdf, .docx. Gebruik Overwrite en Auto-reindex waar nodig.",
+    "calloutMistake": {
+      "tone": "warn",
+      "title": "Meest voorkomende fout",
+      "body": "Document bewerken en Reindex vergeten — gebruikers krijgen dan nog oude antwoorden tot je herindexeert."
+    }
+  },
+  "training": {
+    "routeLine": "Route:",
+    "intro": "Beoordeel voorbeelden uit chat/tests. Goede rijen goedkeuren en foute verbeteren bouwt een kwalitatieve dataset voor later modelwerk.",
+    "filtersTable": {
+      "headers": ["Filter", "Betekenis"],
+      "rows": [
+        ["pending", "Wacht op menselijke review"],
+        ["approved", "Geaccepteerd als correct"],
+        ["edited", "Je hebt ideale output gecorrigeerd"],
+        ["rejected", "Niet geschikt voor training"]
+      ]
+    },
+    "keyboardBody": "Toetsenbord: ← → navigeren, A goedkeuren, R afwijzen.",
+    "calloutDoNot": {
+      "tone": "warn",
+      "title": "Niet doen",
+      "body": "Rijen goedkeuren zonder categorie en prioriteit te checken. Bulk pending afwijzen zonder te lezen."
+    }
+  },
+  "quality": {
+    "routeLine": "Route:",
+    "intro": "Mismatch-groepen tonen foutpatronen. Run eval draait een batchtest (~80 cases). Analyze pending vraagt het analyzermodel om voorgestelde prompttoevoegingen (gecached, rate-limited). Actieve overschrijvingen zijn live extra regels aan de assistentinstructies.",
+    "workflowHeading": "Voorgestelde workflow",
+    "workflowSteps": [
+      "Draai eval voor een baseline-score.",
+      "Bekijk mismatch-groepen om te zien wat faalt.",
+      "Draai Analyze pending; lees elke suggestie zorgvuldig.",
+      "Pas alleen toe wat je begrijpt; bewerk tekst in de modal indien nodig.",
+      "Draai later opnieuw eval en vergelijk nauwkeurigheid; rollback als metrieken verslechteren."
+    ],
+    "constraintsTable": {
+      "headers": ["Beperking", "Wat te doen"],
+      "rows": [
+        [
+          "Slechts één eval tegelijk",
+          "Wacht tot de run klaar is voordat je een nieuwe start"
+        ],
+        [
+          "Beperkt aantal actieve overschrijvingen",
+          "Draai oude regels terug voordat je nieuwe toevoegt als je op de limiet zit"
+        ],
+        [
+          "Verse eval kan verplicht zijn vóór toepassen",
+          "Draai eval als de UI zegt dat de baseline te oud is"
+        ]
+      ]
+    },
+    "calloutDoNot": {
+      "tone": "danger",
+      "title": "Niet doen",
+      "list": [
+        "Overschrijvingen toepassen die je niet begrijpt.",
+        "Nauwkeurigheidsverschillen na een wijziging negeren.",
+        "Zware eval herhaaldelijk tijdens piekchat als je API-quota krap is."
+      ]
+    }
+  }
+}

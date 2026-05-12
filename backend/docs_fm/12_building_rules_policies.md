@@ -112,3 +112,9 @@ Data controller: Vastgoed Meridian B.V. Privacy policy available at reception or
 | Privacy inquiries | — | privacy@meridian-breda.nl |
 | Emergency services | 112 | — |
 | Police (non-emergency) | 0900-8844 | — |
+
+Service Level Targets
+Facility management aims to respond within the following timeframes:
+PriorityInitial ResponseResolution TargetURGENT (safety/flooding/fire)15 minutesSame dayHIGH (no heating, power loss, major disruption)1 hourSame day or next business dayNORMAL (dripping tap, broken equipment)4 hoursWithin 5 business daysLOW (cosmetic, minor)1 business dayWithin 10 business days
+These are targets, not guarantees. Complex issues (e.g., requiring specialist contractors
+or parts ordering) may take longer. FM will communicate expected timelines for each ticket.

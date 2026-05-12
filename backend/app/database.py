@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import copy
 import sqlite3
 import hashlib
 import hmac
 import csv
 import json
+import re
 import logging
 import secrets
 import uuid
@@ -22,6 +24,7 @@ from .config import (
     AUTH_BOOTSTRAP_USER_PASSWORD,
     AUTH_BOOTSTRAP_USER_USERNAME,
     AUTH_SESSION_TTL_HOURS,
+    QUESTION_BANK_DEDUP_SCOPE,
     SQLITE_DB_PATH,
     TRAINING_DATA_AUTO_REFRESH,
     TRAINING_DATA_AUTO_REFRESH_SECONDS,
@@ -32,7 +35,7 @@ from .config import (
 ALLOWED_STATUS = {"Open", "In Progress", "Resolved"}
 ALLOWED_GAP_STATUS = {"new", "reviewed", "resolved"}
 ALLOWED_CORRECTION_TYPES = {"pending", "approved", "edited", "rejected"}
-ALLOWED_SOURCE_TYPES = {"chat_log", "ticket", "test_case"}
+ALLOWED_SOURCE_TYPES = {"chat_log", "ticket", "test_case", "prompt_replay"}
 ALLOWED_OVERRIDE_FIELDS = {"category", "priority", "department"}
 _AUTO_REFRESH_LOCK = threading.Lock()
 _LAST_AUTO_REFRESH_TS = 0.0
@@ -435,14 +438,15 @@ def init_db() -> None:
                 error_type TEXT NOT NULL,
                 suggested_change TEXT NOT NULL DEFAULT '',
                 approved_change TEXT NOT NULL,
+                rationale TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'pending',
-                affected_example_ids TEXT NOT NULL DEFAULT '[]',
                 created_by_user_id INTEGER,
                 created_at TEXT NOT NULL,
                 activated_at TEXT,
                 deactivated_at TEXT,
                 eval_baseline_id INTEGER,
-                eval_after_id INTEGER
+                eval_after_id INTEGER,
+                replay_summary_json TEXT NOT NULL DEFAULT '{}'
             )
             """
         )
@@ -450,6 +454,37 @@ def init_db() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_prompt_overrides_status
             ON prompt_overrides(status)
+            """
+        )
+        po_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(prompt_overrides)").fetchall()
+        }
+        if "replay_summary_json" not in po_cols:
+            conn.execute(
+                "ALTER TABLE prompt_overrides ADD COLUMN replay_summary_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "rationale" not in po_cols:
+            conn.execute(
+                "ALTER TABLE prompt_overrides ADD COLUMN rationale TEXT NOT NULL DEFAULT ''"
+            )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prompt_suggestion_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                error_type TEXT NOT NULL DEFAULT '',
+                suggested_change TEXT NOT NULL DEFAULT '',
+                decision TEXT NOT NULL DEFAULT 'rejected',
+                reason TEXT NOT NULL DEFAULT '',
+                affected_example_ids TEXT NOT NULL DEFAULT '[]',
+                created_by_user_id INTEGER,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_prompt_suggestion_decisions_decision
+            ON prompt_suggestion_decisions(decision, created_at DESC)
             """
         )
         conn.execute(
@@ -469,6 +504,127 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_created
             ON chat_messages(thread_id, created_at ASC)
             """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS training_question_prompt_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                training_example_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                override_id INTEGER,
+                analysis_cache_key TEXT,
+                ref_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(training_example_id) REFERENCES training_examples(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tqpe_example
+            ON training_question_prompt_events(training_example_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tqpe_type
+            ON training_question_prompt_events(event_type)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tqpe_created
+            ON training_question_prompt_events(created_at DESC)
+            """
+        )
+        # Idempotency for suggestion_affected events: at most one row per
+        # (example, event_type, analysis_cache_key). For events without a
+        # cache_key (override_applied/superseded/rollback) SQLite treats each
+        # NULL as distinct, so no spurious dedup happens there.
+        # Migration safety: drop any pre-existing duplicates before creating
+        # the unique index so old DBs upgrade cleanly.
+        try:
+            conn.execute(
+                """
+                DELETE FROM training_question_prompt_events
+                WHERE id NOT IN (
+                    SELECT MIN(id) FROM training_question_prompt_events
+                    WHERE analysis_cache_key IS NOT NULL
+                    GROUP BY training_example_id, event_type, analysis_cache_key
+                )
+                AND analysis_cache_key IS NOT NULL
+                """
+            )
+        except Exception:
+            pass
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_tqpe_dedup
+            ON training_question_prompt_events(
+                training_example_id, event_type, analysis_cache_key
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_model_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                provider TEXT NOT NULL DEFAULT 'openai_compatible',
+                base_url TEXT NOT NULL,
+                default_model TEXT NOT NULL,
+                api_key_encrypted TEXT,
+                env_alias TEXT,
+                disabled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_task_defaults (
+                task TEXT PRIMARY KEY,
+                profile_id INTEGER,
+                FOREIGN KEY(profile_id) REFERENCES llm_model_profiles(id)
+            )
+            """
+        )
+        # Audit trail for prompt-override lifecycle changes (apply / rollback /
+        # consolidate). The override row itself only captures the *apply* actor;
+        # this table preserves who did each subsequent action and when.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prompt_override_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                override_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                actor_user_id INTEGER,
+                created_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_prompt_override_audit_override
+            ON prompt_override_audit(override_id, created_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('rules_version', '1')"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('db_salt', ?)",
+            (secrets.token_urlsafe(32),),
         )
         _ensure_default_user(conn, ADMIN_USERNAME, ADMIN_PASSWORD or "admin", "admin")
         if AUTH_BOOTSTRAP_USER_PASSWORD:
@@ -490,6 +646,15 @@ def init_db() -> None:
                 (admin_user_id,),
             )
         conn.commit()
+    # Apply Alembic migrations on top of the legacy idempotent schema. The
+    # baseline (0001) is auto-stamped on first run; revisions 0002+ deliver
+    # structural changes (junction table, meta table, etc.).
+    try:
+        from .db_migrations import run_migrations as _alembic_run_migrations
+
+        _alembic_run_migrations()
+    except Exception:
+        _db_log.exception("alembic upgrade head failed")
 
 
 def create_ticket(
@@ -978,6 +1143,59 @@ def list_users() -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def erase_user_chat_and_training_data(user_id: int) -> dict[str, int]:
+    """Delete chat history and training rows for ``user_id`` in one transaction.
+
+    Removes ``training_question_prompt_events`` for that user's examples, then
+    ``training_examples``, then ``chat_messages`` / ``chat_threads``. Does not
+    delete the ``users`` row, ``sessions``, or ``tickets``.
+
+    Returns per-table delete counts (SQLite ``rowcount``, best-effort).
+    """
+    uid = int(user_id)
+    deleted_events = 0
+    deleted_examples = 0
+    deleted_messages = 0
+    deleted_threads = 0
+    with get_conn() as conn:
+        ex_rows = conn.execute(
+            "SELECT id FROM training_examples WHERE user_id = ?", (uid,)
+        ).fetchall()
+        ex_ids = [int(r["id"]) for r in ex_rows]
+        if ex_ids:
+            placeholders = ",".join("?" for _ in ex_ids)
+            cur = conn.execute(
+                f"""
+                DELETE FROM training_question_prompt_events
+                WHERE training_example_id IN ({placeholders})
+                """,
+                ex_ids,
+            )
+            deleted_events = int(cur.rowcount or 0)
+        cur = conn.execute("DELETE FROM training_examples WHERE user_id = ?", (uid,))
+        deleted_examples = int(cur.rowcount or 0)
+        thread_rows = conn.execute(
+            "SELECT id FROM chat_threads WHERE user_id = ?", (uid,)
+        ).fetchall()
+        thread_ids = [int(r["id"]) for r in thread_rows]
+        if thread_ids:
+            ph = ",".join("?" for _ in thread_ids)
+            cur = conn.execute(
+                f"DELETE FROM chat_messages WHERE thread_id IN ({ph})",
+                thread_ids,
+            )
+            deleted_messages = int(cur.rowcount or 0)
+        cur = conn.execute("DELETE FROM chat_threads WHERE user_id = ?", (uid,))
+        deleted_threads = int(cur.rowcount or 0)
+    _auto_refresh_v1_dataset_files()
+    return {
+        "training_question_prompt_events_deleted": deleted_events,
+        "training_examples_deleted": deleted_examples,
+        "chat_messages_deleted": deleted_messages,
+        "chat_threads_deleted": deleted_threads,
+    }
+
+
 def update_user_admin_fields(
     user_id: int,
     *,
@@ -1308,6 +1526,62 @@ def get_training_example(example_id: int) -> dict[str, Any]:
     return _hydrate_training_example(row) if row else {}
 
 
+def get_training_examples_review_items_by_ids(
+    ids: list[int],
+) -> dict[int, dict[str, Any]]:
+    """Rows keyed by id in the same shape as ``list_review_signals`` ``examples`` items.
+
+    Used when analyzer ``affected_ids`` lists more examples than the capped
+    per-group ``examples`` embedded in review signals.
+    """
+    clean: list[int] = []
+    seen: set[int] = set()
+    for x in ids:
+        try:
+            i = int(x)
+        except (TypeError, ValueError):
+            continue
+        if i not in seen:
+            seen.add(i)
+            clean.append(i)
+    if not clean:
+        return {}
+    out: dict[int, dict[str, Any]] = {}
+    chunk_size = 400
+    for start in range(0, len(clean), chunk_size):
+        chunk = clean[start : start + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        with get_conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, input_text, actual_output_json, ideal_output_json,
+                       human_notes, reasoning, correction_type, mismatch_fields,
+                       expected_payload, actual_payload, source_type, created_at,
+                       reviewed_at
+                FROM training_examples
+                WHERE id IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall()
+        for row in rows:
+            correction = str(row["correction_type"] or "").lower()
+            item = {
+                "id": int(row["id"]),
+                "input_text": row["input_text"] or "",
+                "actual_output": _json_load(row["actual_output_json"] or "{}", {}),
+                "ideal_output": _json_load(row["ideal_output_json"] or "{}", {}),
+                "human_notes": str(row["human_notes"] or "").strip(),
+                "reasoning": str(row["reasoning"] or "").strip(),
+                "correction_type": correction or "pending",
+                "mismatch_fields": _json_load(row["mismatch_fields"] or "[]", []),
+                "expected_payload": _json_load(row["expected_payload"] or "{}", {}),
+                "actual_payload": _json_load(row["actual_payload"] or "{}", {}),
+                "source_type": row["source_type"] or "",
+            }
+            out[int(row["id"])] = item
+    return out
+
+
 def update_training_example_mismatch(
     example_id: int,
     *,
@@ -1519,6 +1793,320 @@ def compute_pending_cache_key() -> str:
     return hashlib.sha256(ids.encode("utf-8")).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# Review-driven analyzer (rebuilt Training Quality)
+# ---------------------------------------------------------------------------
+def _classify_review_bucket(item: dict[str, Any]) -> str:
+    """Pick a stable bucket label so the analyzer sees coherent groups.
+
+    Priority: explicit reject > explicit edit > note-only feedback. Within
+    edits we surface the dominant mismatch field (category / priority /
+    ticket_created / response) so suggested rules stay focused.
+    """
+    correction = str(item.get("correction_type", "") or "").lower()
+    if correction == "rejected":
+        return "rejected_response"
+
+    fields_raw = item.get("mismatch_fields") or []
+    if isinstance(fields_raw, list) and fields_raw:
+        priority_order = (
+            "category_mismatch",
+            "priority_mismatch",
+            "ticket_missing",
+            "ticket_created_mismatch",
+            "ticket_created",
+            "response_tokens_missing",
+        )
+        for field in priority_order:
+            if field in fields_raw:
+                return field
+        first = fields_raw[0]
+        if isinstance(first, str) and first:
+            return first
+
+    if correction == "edited":
+        return "edited_other"
+    if str(item.get("human_notes", "")).strip() or str(item.get("reasoning", "")).strip():
+        return "note_only"
+    return "edited_other"
+
+
+def list_review_signals_for_analysis(
+    limit: int = 60, max_examples_per_group: int = 5
+) -> dict[str, Any]:
+    """Return reviewed training_examples carrying useful human signal.
+
+    Pulls rows where any of the following holds:
+    - correction_type IN ('edited', 'rejected'),
+    - human_notes is non-empty,
+    - reasoning is non-empty.
+
+    Groups them by mismatch pattern / correction type so the analyzer can
+    propose 1-3 focused rules per cluster instead of one rule per row.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, input_text, actual_output_json, ideal_output_json,
+                   human_notes, reasoning, correction_type, mismatch_fields,
+                   expected_payload, actual_payload, source_type, created_at,
+                   reviewed_at
+            FROM training_examples
+            WHERE correction_type IN ('edited', 'rejected')
+               OR trim(COALESCE(human_notes, '')) <> ''
+               OR trim(COALESCE(reasoning, '')) <> ''
+            ORDER BY COALESCE(reviewed_at, created_at) DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+
+    groups: dict[str, dict[str, Any]] = {}
+    total = 0
+    edited = 0
+    rejected = 0
+    notes_only = 0
+
+    for row in rows:
+        total += 1
+        correction = str(row["correction_type"] or "").lower()
+        if correction == "edited":
+            edited += 1
+        elif correction == "rejected":
+            rejected += 1
+        elif (str(row["human_notes"] or "").strip() or str(row["reasoning"] or "").strip()):
+            notes_only += 1
+
+        item = {
+            "id": int(row["id"]),
+            "input_text": row["input_text"] or "",
+            "actual_output": _json_load(row["actual_output_json"] or "{}", {}),
+            "ideal_output": _json_load(row["ideal_output_json"] or "{}", {}),
+            "human_notes": str(row["human_notes"] or "").strip(),
+            "reasoning": str(row["reasoning"] or "").strip(),
+            "correction_type": correction or "pending",
+            "mismatch_fields": _json_load(row["mismatch_fields"] or "[]", []),
+            "expected_payload": _json_load(row["expected_payload"] or "{}", {}),
+            "actual_payload": _json_load(row["actual_payload"] or "{}", {}),
+            "source_type": row["source_type"] or "",
+        }
+
+        bucket_key = _classify_review_bucket(item)
+        bucket = groups.setdefault(
+            bucket_key,
+            {"type": bucket_key, "count": 0, "affected_ids": [], "examples": []},
+        )
+        bucket["count"] += 1
+        bucket["affected_ids"].append(item["id"])
+        if len(bucket["examples"]) < max(1, int(max_examples_per_group)):
+            bucket["examples"].append(item)
+
+    ordered = sorted(groups.values(), key=lambda g: -g["count"])
+    return {
+        "total_signals": total,
+        "edited": edited,
+        "rejected": rejected,
+        "notes_only": notes_only,
+        "groups": ordered,
+        "generated_at": _utc_now_iso(),
+    }
+
+
+def compute_review_signals_cache_key() -> str:
+    """sha256 of (id, reviewed_at|created_at) of all rows that contribute to
+    list_review_signals_for_analysis. Stable until any reviewer edits a row."""
+    import hashlib
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, COALESCE(reviewed_at, created_at) AS ts
+            FROM training_examples
+            WHERE correction_type IN ('edited', 'rejected')
+               OR trim(COALESCE(human_notes, '')) <> ''
+               OR trim(COALESCE(reasoning, '')) <> ''
+            ORDER BY id
+            """
+        ).fetchall()
+    if not rows:
+        return "empty:review-signals"
+    payload = "|".join(f"{int(r['id'])}:{r['ts']}" for r in rows)
+    return "rs:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def covered_example_ids_from_active_overrides(
+    active_overrides: list[dict[str, Any]] | None = None,
+) -> set[int]:
+    """Union of example IDs covered by every currently-active prompt override.
+
+    Reads directly from the junction table in a single SQL when ``active_overrides``
+    is None; otherwise uses the in-memory list (back-compat with callers that
+    already loaded it). Replaces the legacy "iterate JSON blob" loop.
+    """
+    if active_overrides is None:
+        try:
+            with get_conn() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT poe.example_id
+                    FROM prompt_override_examples poe
+                    JOIN prompt_overrides po ON po.id = poe.override_id
+                    WHERE po.status = 'active'
+                    """
+                ).fetchall()
+            return {int(r["example_id"]) for r in rows}
+        except Exception:
+            active_overrides = list_prompt_overrides(status="active", limit=200)
+    out: set[int] = set()
+    for o in active_overrides or []:
+        for x in o.get("affected_example_ids") or []:
+            try:
+                out.add(int(x))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def suppress_review_signals(
+    signals: dict[str, Any], covered_ids: set[int]
+) -> dict[str, Any]:
+    """Drop training-example IDs already covered by active overrides from each group.
+
+    Groups with no remaining ``affected_ids`` are removed. ``total_signals`` is
+    recomputed as the sum of remaining affected id counts; group ``count`` matches
+    ``len(affected_ids)`` after filtering.
+    """
+    if not covered_ids:
+        return copy.deepcopy(signals)
+    out = copy.deepcopy(signals)
+    groups_in = out.get("groups") or []
+    if not isinstance(groups_in, list):
+        return out
+
+    new_groups: list[dict[str, Any]] = []
+    for g in groups_in:
+        if not isinstance(g, dict):
+            continue
+        raw_aff = g.get("affected_ids") or []
+        aff: list[int] = []
+        for x in raw_aff:
+            try:
+                aff.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        aff_f = [i for i in aff if i not in covered_ids]
+        if not aff_f:
+            continue
+        ex_in = g.get("examples") or []
+        ex_f = [
+            e
+            for e in ex_in
+            if isinstance(e, dict) and int(e.get("id", -1)) not in covered_ids
+        ]
+        max_keep = len(ex_in) if ex_in else 5
+        ng = {**g, "affected_ids": aff_f, "count": len(aff_f), "examples": ex_f[:max_keep]}
+        new_groups.append(ng)
+
+    new_groups.sort(key=lambda x: -int(x.get("count") or 0))
+    out["groups"] = new_groups
+    out["total_signals"] = sum(len(g.get("affected_ids") or []) for g in new_groups)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# prompt_suggestion_decisions helpers
+# ---------------------------------------------------------------------------
+def record_prompt_suggestion_decision(
+    *,
+    error_type: str,
+    suggested_change: str,
+    decision: str = "rejected",
+    reason: str = "",
+    affected_example_ids: list[int] | None = None,
+    created_by_user_id: int | None = None,
+) -> dict[str, Any]:
+    """Record an analyzer suggestion outcome (rejected / discarded). Used as
+    feedback so future analyzer runs avoid repeating the same idea."""
+    decision_clean = (decision or "rejected").strip().lower() or "rejected"
+    now = _utc_now_iso()
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO prompt_suggestion_decisions (
+                error_type, suggested_change, decision, reason,
+                affected_example_ids, created_by_user_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(error_type or "").strip(),
+                str(suggested_change or "").strip(),
+                decision_clean,
+                str(reason or "").strip(),
+                _json_dump(affected_example_ids or []),
+                created_by_user_id,
+                now,
+            ),
+        )
+        rid = int(cur.lastrowid)
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM prompt_suggestion_decisions WHERE id = ?", (rid,)
+        ).fetchone()
+    if not row:
+        return {}
+    item = dict(row)
+    item["affected_example_ids"] = _json_load(
+        item.get("affected_example_ids") or "[]", []
+    )
+    return item
+
+
+def list_recent_suggestion_decisions(
+    *, decision: str | None = "rejected", limit: int = 20
+) -> list[dict[str, Any]]:
+    """Return recent decisions (default: rejections) so analyzer can avoid
+    re-suggesting the same rule."""
+    where = ""
+    params: list[Any] = []
+    if decision:
+        where = "WHERE decision = ?"
+        params.append(decision.strip().lower())
+    params.append(max(1, int(limit)))
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, error_type, suggested_change, decision, reason,
+                   affected_example_ids, created_at
+            FROM prompt_suggestion_decisions
+            {where}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        item = dict(r)
+        item["affected_example_ids"] = _json_load(
+            item.get("affected_example_ids") or "[]", []
+        )
+        out.append(item)
+    return out
+
+
+def set_prompt_override_replay_summary(
+    override_id: int, summary: dict[str, Any]
+) -> None:
+    """Persist the latest mini-replay summary on a prompt_override row."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE prompt_overrides SET replay_summary_json = ? WHERE id = ?",
+            (_json_dump(summary or {}), int(override_id)),
+        )
+        conn.commit()
+
+
 def get_prompt_analysis_cache(cache_key: str, ttl_hours: int) -> dict[str, Any] | None:
     """Return cached result if fresh; None if missing or expired."""
     with get_conn() as conn:
@@ -1561,6 +2149,111 @@ def put_prompt_analysis_cache(cache_key: str, result: dict[str, Any], model: str
         conn.commit()
 
 
+def record_prompt_override_audit(
+    *,
+    override_id: int,
+    action: str,
+    actor_user_id: int | None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Append a row to `prompt_override_audit`. Best-effort: failures are
+    swallowed so audit is never load-bearing for the user-facing operation."""
+    if not action:
+        return
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO prompt_override_audit (
+                    override_id, action, actor_user_id, created_at, payload_json
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    int(override_id),
+                    str(action).strip().lower(),
+                    int(actor_user_id) if actor_user_id is not None else None,
+                    _utc_now_iso(),
+                    _json_dump(payload or {}),
+                ),
+            )
+            conn.commit()
+    except Exception:
+        _db_log.exception("record_prompt_override_audit failed for override %s", override_id)
+
+
+def list_prompt_override_audit(
+    override_id: int, *, limit: int = 50
+) -> list[dict[str, Any]]:
+    """Return audit rows for one override, newest first."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, override_id, action, actor_user_id, created_at, payload_json
+            FROM prompt_override_audit
+            WHERE override_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(override_id), max(1, int(limit))),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        item = dict(r)
+        item["payload"] = _json_load(item.get("payload_json") or "{}", {})
+        item.pop("payload_json", None)
+        out.append(item)
+    return out
+
+
+def vacuum_training_quality_caches(
+    *, ttl_hours: int, keep_per_kind: int
+) -> dict[str, int]:
+    """Delete expired analyzer cache rows and trim per-(example, event_type)
+    history in `training_question_prompt_events`.
+
+    Returns counts so the caller can log progress. Best-effort: failures are
+    swallowed inside individual statements so a transient lock never crashes
+    the whole sweep.
+    """
+    deleted_cache = 0
+    deleted_events = 0
+    cutoff = _utc_now() - timedelta(hours=max(0, int(ttl_hours)))
+    cutoff_iso = cutoff.isoformat()
+    with get_conn() as conn:
+        try:
+            cur = conn.execute(
+                "DELETE FROM prompt_analysis_cache WHERE created_at < ?",
+                (cutoff_iso,),
+            )
+            deleted_cache = int(cur.rowcount or 0)
+        except Exception:
+            pass
+        try:
+            cur = conn.execute(
+                """
+                DELETE FROM training_question_prompt_events
+                WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY training_example_id, event_type
+                                   ORDER BY created_at DESC, id DESC
+                               ) AS rn
+                        FROM training_question_prompt_events
+                    )
+                    WHERE rn > ?
+                )
+                """,
+                (max(1, int(keep_per_kind)),),
+            )
+            deleted_events = int(cur.rowcount or 0)
+        except Exception:
+            pass
+        conn.commit()
+    return {"deleted_cache_rows": deleted_cache, "deleted_event_rows": deleted_events}
+
+
 def _isoformat_to_datetime(s: str):
     from datetime import datetime
     s = (s or "").strip()
@@ -1575,40 +2268,234 @@ def _utc_now():
 
 
 # ---------------------------------------------------------------------------
+# meta key/value helpers (Phase 2: rules_version, db_salt, etc.)
+# ---------------------------------------------------------------------------
+def get_meta(key: str, default: str | None = None) -> str | None:
+    """Read one meta value; returns ``default`` when missing.
+
+    Tolerant of the case where the table does not yet exist (very fresh DB
+    where alembic has not run yet).
+    """
+    try:
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (str(key),)
+            ).fetchone()
+    except Exception:
+        return default
+    if not row:
+        return default
+    return str(row["value"])
+
+
+def set_meta(key: str, value: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO meta (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (str(key), str(value)),
+        )
+        conn.commit()
+
+
+def delete_meta(key: str) -> None:
+    """Remove a meta row if present (used to clear optional overrides)."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM meta WHERE key = ?", (str(key),))
+        conn.commit()
+
+
+def _bump_rules_version(conn: sqlite3.Connection) -> int:
+    """Increment ``meta.rules_version`` inside the caller's tx and return it.
+
+    Used by every apply / rollback / consolidate so other workers can detect
+    that their cached active-override snapshot is stale (Phase 3).
+    """
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'rules_version'"
+        ).fetchone()
+        current = int(row["value"]) if row and str(row["value"]).isdigit() else 0
+    except Exception:
+        current = 0
+    new_value = current + 1
+    try:
+        conn.execute(
+            """
+            INSERT INTO meta (key, value) VALUES ('rules_version', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (str(new_value),),
+        )
+    except Exception:
+        # Table may be missing on a very fresh DB before alembic ran. Caller
+        # can still proceed; cache invalidation falls back to per-process TTL.
+        pass
+    return new_value
+
+
+def get_rules_version() -> int:
+    raw = get_meta("rules_version", "0") or "0"
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+RAG_SYSTEM_PROMPT_HEAD_META_KEY = "rag_system_prompt_head_override"
+RAG_SYSTEM_PROMPT_HEAD_MAX_CHARS = 400_000
+
+
+def get_rag_system_prompt_head_override() -> str | None:
+    """Return the stored full base system-prompt block, or ``None`` if unset."""
+    raw = get_meta(RAG_SYSTEM_PROMPT_HEAD_META_KEY)
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    return s or None
+
+
+def set_rag_system_prompt_head_override(text: str | None) -> dict[str, Any]:
+    """Replace or clear the FM base system prompt (the ``SYSTEM_PROMPT_HEAD`` block).
+
+    Pass ``None`` or whitespace-only text to delete the override and restore the
+    built-in template from code. Bumps ``meta.rules_version`` for cache
+    coherence across workers.
+    """
+    cleared = text is None or not str(text).strip()
+    with get_conn() as conn:
+        if cleared:
+            conn.execute(
+                "DELETE FROM meta WHERE key = ?",
+                (RAG_SYSTEM_PROMPT_HEAD_META_KEY,),
+            )
+        else:
+            body = str(text)
+            if len(body) > RAG_SYSTEM_PROMPT_HEAD_MAX_CHARS:
+                raise ValueError(
+                    f"system prompt override exceeds max length ({RAG_SYSTEM_PROMPT_HEAD_MAX_CHARS})"
+                )
+            conn.execute(
+                """
+                INSERT INTO meta (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (RAG_SYSTEM_PROMPT_HEAD_META_KEY, body),
+            )
+        _bump_rules_version(conn)
+        conn.commit()
+    return {"ok": True, "using_builtin": cleared}
+
+
+# ---------------------------------------------------------------------------
+# prompt_override_examples junction helpers (Phase 2)
+# ---------------------------------------------------------------------------
+def _insert_override_examples(
+    conn: sqlite3.Connection, override_id: int, example_ids: list[int]
+) -> None:
+    """Populate the junction table; idempotent. Caller owns the transaction."""
+    seen: set[int] = set()
+    for x in example_ids or []:
+        try:
+            eid = int(x)
+        except (TypeError, ValueError):
+            continue
+        if eid in seen:
+            continue
+        seen.add(eid)
+        conn.execute(
+            "INSERT OR IGNORE INTO prompt_override_examples "
+            "(override_id, example_id) VALUES (?, ?)",
+            (int(override_id), eid),
+        )
+
+
+def _override_example_ids(
+    conn: sqlite3.Connection, override_id: int
+) -> list[int]:
+    """Junction-table read.
+
+    Returns the example IDs claimed by this override in stable id order.
+    The legacy JSON column was removed in migration 0004; the junction
+    table is now the single source of truth.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT example_id FROM prompt_override_examples "
+            "WHERE override_id = ? ORDER BY example_id",
+            (int(override_id),),
+        ).fetchall()
+    except Exception:
+        return []
+    return [int(r["example_id"]) for r in rows]
+
+
+# ---------------------------------------------------------------------------
 # prompt_overrides (Faza E) helpers
 # ---------------------------------------------------------------------------
 import threading as _threading
 
 _active_overrides_lock = _threading.Lock()
-# `ts` is None until first populated, so a fresh process (monotonic_now < TTL)
-# never returns a stale empty list.
-_active_overrides_cache: dict[str, Any] = {"ts": None, "data": []}
-_ACTIVE_OVERRIDES_TTL_SECONDS = 30.0
+# Snapshot is keyed by ``meta.rules_version``; whenever the version changes
+# (any apply/rollback/consolidate, even from another worker), the cached entry
+# is treated as stale and refreshed on the next read. There is no time-based
+# TTL anymore — the version token is the single source of truth.
+_active_overrides_cache: dict[str, Any] = {"version": None, "data": []}
 
 
 def _hydrate_override(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
     try:
-        item["affected_example_ids"] = _json_load(item.get("affected_example_ids") or "[]", [])
+        with get_conn() as conn:
+            item["affected_example_ids"] = _override_example_ids(
+                conn, int(item.get("id") or 0)
+            )
     except Exception:
         item["affected_example_ids"] = []
+    try:
+        item["replay_summary"] = _json_load(item.get("replay_summary_json") or "{}", {})
+    except Exception:
+        item["replay_summary"] = {}
+    return item
+
+
+def _hydrate_override_with_conn(
+    conn: sqlite3.Connection, row: sqlite3.Row
+) -> dict[str, Any]:
+    """Same as ``_hydrate_override`` but reuses the caller's connection so the
+    junction read joins the same transaction (used inside lifecycle ops)."""
+    item = dict(row)
+    try:
+        item["affected_example_ids"] = _override_example_ids(
+            conn, int(item.get("id") or 0)
+        )
+    except Exception:
+        item["affected_example_ids"] = []
+    try:
+        item["replay_summary"] = _json_load(item.get("replay_summary_json") or "{}", {})
+    except Exception:
+        item["replay_summary"] = {}
     return item
 
 
 def get_active_prompt_overrides(force_refresh: bool = False) -> list[dict[str, Any]]:
     """Return active overrides (status='active'), in stable order (id ASC).
-    Uses a process-local 30s cache so each chat call doesn't hit SQLite."""
-    import time as _time
 
-    now = _time.monotonic()
-    with _active_overrides_lock:
-        ts = _active_overrides_cache["ts"]
-        if (
-            not force_refresh
-            and ts is not None
-            and (now - ts) < _ACTIVE_OVERRIDES_TTL_SECONDS
-        ):
-            return list(_active_overrides_cache["data"])
+    Multi-worker safe: the snapshot is keyed by ``meta.rules_version``. Any
+    apply / rollback / consolidate (even from another uvicorn worker) bumps
+    the version, so the next read here refreshes from SQLite rather than
+    serving a stale per-process cache.
+    """
+    if not force_refresh:
+        version = get_rules_version()
+        with _active_overrides_lock:
+            cached_version = _active_overrides_cache["version"]
+            if cached_version is not None and cached_version == version:
+                return list(_active_overrides_cache["data"])
+    else:
+        version = get_rules_version()
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -1617,17 +2504,23 @@ def get_active_prompt_overrides(force_refresh: bool = False) -> list[dict[str, A
             ORDER BY id ASC
             """
         ).fetchall()
-    data = [_hydrate_override(r) for r in rows]
+        data = [_hydrate_override_with_conn(conn, r) for r in rows]
     with _active_overrides_lock:
-        _active_overrides_cache["ts"] = now
+        _active_overrides_cache["version"] = version
         _active_overrides_cache["data"] = data
     return list(data)
 
 
 def invalidate_active_overrides_cache() -> None:
-    """Force the next get_active_prompt_overrides() to re-read from DB."""
+    """Force the next get_active_prompt_overrides() to re-read from DB.
+
+    With Phase 3 the ``meta.rules_version`` token already drives invalidation,
+    so this helper is mostly a safety net for callers that just mutated state
+    but want a guaranteed fresh read on the very next call within the same
+    process.
+    """
     with _active_overrides_lock:
-        _active_overrides_cache["ts"] = None
+        _active_overrides_cache["version"] = None
         _active_overrides_cache["data"] = []
 
 
@@ -1644,28 +2537,41 @@ def apply_prompt_override(
     error_type: str,
     suggested_change: str,
     approved_change: str,
-    affected_example_ids: list[int] | None,
-    created_by_user_id: int | None,
-    eval_baseline_id: int | None,
+    rationale: str = "",
+    affected_example_ids: list[int] | None = None,
+    created_by_user_id: int | None = None,
+    eval_baseline_id: int | None = None,
 ) -> dict[str, Any]:
     """Insert a new active override row. Caller is responsible for guard rails
-    (max-active count, baseline-required, confidence floor)."""
+    (max-active count, baseline-required, confidence floor).
+
+    Single transaction covers: override row insert, junction-table population,
+    legacy JSON column write (until Phase 4 drops it), training_example
+    correction_type backfill, suggestion-bank event log, and rules_version
+    bump for multi-worker cache invalidation.
+    """
     now = _utc_now_iso()
+    ids: list[int] = []
+    for x in affected_example_ids or []:
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            continue
     with get_conn() as conn:
         cur = conn.execute(
             """
             INSERT INTO prompt_overrides (
-                error_type, suggested_change, approved_change, status,
-                affected_example_ids, created_by_user_id, created_at, activated_at,
+                error_type, suggested_change, approved_change, rationale, status,
+                created_by_user_id, created_at, activated_at,
                 eval_baseline_id
             )
-            VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
             """,
             (
                 error_type,
                 suggested_change,
                 approved_change,
-                _json_dump(affected_example_ids or []),
+                rationale,
                 created_by_user_id,
                 now,
                 now,
@@ -1673,24 +2579,50 @@ def apply_prompt_override(
             ),
         )
         oid = int(cur.lastrowid)
-        # Mark affected training_examples for traceability.
-        ids = affected_example_ids or []
+        _insert_override_examples(conn, oid, ids)
         if ids:
             placeholders = ",".join(["?"] * len(ids))
             conn.execute(
                 f"UPDATE training_examples SET correction_type = 'prompt_proposed' "
                 f"WHERE id IN ({placeholders}) AND correction_type = 'pending'",
-                tuple(int(x) for x in ids),
+                tuple(ids),
             )
+            for eid in ids:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO training_question_prompt_events (
+                        training_example_id, event_type, override_id,
+                        analysis_cache_key, ref_json, created_at
+                    )
+                    VALUES (?, 'override_applied', ?, NULL, ?, ?)
+                    """,
+                    (eid, oid, _json_dump({"override_id": oid}), now),
+                )
+        _bump_rules_version(conn)
         conn.commit()
-        row = conn.execute("SELECT * FROM prompt_overrides WHERE id = ?", (oid,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM prompt_overrides WHERE id = ?", (oid,)
+        ).fetchone()
+        result = _hydrate_override_with_conn(conn, row) if row else {}
     invalidate_active_overrides_cache()
-    return _hydrate_override(row) if row else {}
+    return result
 
 
 def rollback_prompt_override(override_id: int) -> dict[str, Any]:
+    """Mark one active override as superseded.
+
+    Single transaction covers the status flip, the rollback event log entries
+    (one per affected training example), and the rules_version bump.
+    """
     now = _utc_now_iso()
     with get_conn() as conn:
+        prior = conn.execute(
+            "SELECT * FROM prompt_overrides WHERE id = ? AND status = 'active'",
+            (int(override_id),),
+        ).fetchone()
+        if not prior:
+            return {}
+        aff_before = _override_example_ids(conn, int(override_id))
         cur = conn.execute(
             """
             UPDATE prompt_overrides
@@ -1700,12 +2632,170 @@ def rollback_prompt_override(override_id: int) -> dict[str, Any]:
             (now, int(override_id)),
         )
         affected = cur.rowcount
+        if affected == 0:
+            conn.rollback()
+            return {}
+        for eid in aff_before:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO training_question_prompt_events (
+                    training_example_id, event_type, override_id,
+                    analysis_cache_key, ref_json, created_at
+                )
+                VALUES (?, 'override_rollback', ?, NULL, ?, ?)
+                """,
+                (
+                    int(eid),
+                    int(override_id),
+                    _json_dump({"override_id": int(override_id)}),
+                    now,
+                ),
+            )
+        _bump_rules_version(conn)
         conn.commit()
-        row = conn.execute("SELECT * FROM prompt_overrides WHERE id = ?", (int(override_id),)).fetchone()
-    if affected == 0:
-        return {}
+        row = conn.execute(
+            "SELECT * FROM prompt_overrides WHERE id = ?", (int(override_id),)
+        ).fetchone()
+        result = _hydrate_override_with_conn(conn, row) if row else {}
     invalidate_active_overrides_cache()
-    return _hydrate_override(row) if row else {}
+    return result
+
+
+def supersede_all_active_prompt_overrides() -> int:
+    """Set every active prompt override to ``superseded`` (local dev / cleanup).
+
+    Returns the number of rows updated. Does not delete history.
+    """
+    now = _utc_now_iso()
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            UPDATE prompt_overrides
+            SET status = 'superseded', deactivated_at = ?
+            WHERE status = 'active'
+            """,
+            (now,),
+        )
+        n = int(cur.rowcount or 0)
+        conn.commit()
+    invalidate_active_overrides_cache()
+    return n
+
+
+def consolidate_active_prompt_overrides(
+    *,
+    error_type: str,
+    suggested_change: str,
+    approved_change: str,
+    rationale: str,
+    created_by_user_id: int | None = None,
+    expected_superseded_ids: list[int] | None = None,
+) -> tuple[dict[str, Any], list[int]]:
+    """Atomically supersede all active overrides and insert one merged active row.
+
+    If ``expected_superseded_ids`` is set, the current active id set must match
+    exactly (order-independent) or ValueError is raised.
+
+    Single transaction covers: CAS check, supersede flip, merged-row insert,
+    junction-table population for the merged row, training_example status
+    backfill, override_superseded + override_applied event log entries, and
+    rules_version bump.
+
+    Returns ``(new_override_dict, superseded_ids ascending)``.
+    """
+    now = _utc_now_iso()
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM prompt_overrides
+            WHERE status = 'active'
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        hydrated = [_hydrate_override_with_conn(conn, r) for r in rows]
+        superseded_ids = [int(h["id"]) for h in hydrated]
+        if expected_superseded_ids is not None:
+            if sorted(superseded_ids) != sorted(int(x) for x in expected_superseded_ids):
+                raise ValueError("active_override_set_changed")
+        id_union: set[int] = set()
+        for h in hydrated:
+            for x in h.get("affected_example_ids") or []:
+                try:
+                    id_union.add(int(x))
+                except (TypeError, ValueError):
+                    continue
+        merged_affected = sorted(id_union)
+
+        conn.execute(
+            """
+            UPDATE prompt_overrides
+            SET status = 'superseded', deactivated_at = ?
+            WHERE status = 'active'
+            """,
+            (now,),
+        )
+        cur = conn.execute(
+            """
+            INSERT INTO prompt_overrides (
+                error_type, suggested_change, approved_change, rationale, status,
+                created_by_user_id, created_at, activated_at,
+                eval_baseline_id
+            )
+            VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
+            """,
+            (
+                error_type,
+                suggested_change,
+                approved_change,
+                rationale,
+                created_by_user_id,
+                now,
+                now,
+                None,
+            ),
+        )
+        oid = int(cur.lastrowid)
+        _insert_override_examples(conn, oid, merged_affected)
+        if merged_affected:
+            placeholders = ",".join(["?"] * len(merged_affected))
+            conn.execute(
+                f"UPDATE training_examples SET correction_type = 'prompt_proposed' "
+                f"WHERE id IN ({placeholders}) AND correction_type = 'pending'",
+                tuple(merged_affected),
+            )
+        for h in hydrated:
+            sid = int(h["id"])
+            for eid in h.get("affected_example_ids") or []:
+                ref = {"superseded_override_id": sid, "new_override_id": oid}
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO training_question_prompt_events (
+                        training_example_id, event_type, override_id,
+                        analysis_cache_key, ref_json, created_at
+                    )
+                    VALUES (?, 'override_superseded', ?, NULL, ?, ?)
+                    """,
+                    (int(eid), sid, _json_dump(ref), now),
+                )
+        for eid in merged_affected:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO training_question_prompt_events (
+                    training_example_id, event_type, override_id,
+                    analysis_cache_key, ref_json, created_at
+                )
+                VALUES (?, 'override_applied', ?, NULL, ?, ?)
+                """,
+                (int(eid), oid, _json_dump({"override_id": oid}), now),
+            )
+        _bump_rules_version(conn)
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM prompt_overrides WHERE id = ?", (oid,)
+        ).fetchone()
+        new_row = _hydrate_override_with_conn(conn, row) if row else {}
+    invalidate_active_overrides_cache()
+    return new_row, superseded_ids
 
 
 def get_prompt_override(override_id: int) -> dict[str, Any]:
@@ -1936,24 +3026,84 @@ def bulk_update_training_examples_review(
     }
 
 
+TRAINING_EXPORT_MAX_IDS = 2000
+
+
 def export_training_examples_jsonl(
     *,
     include_correction_types: list[str] | None = None,
+    example_ids: list[int] | None = None,
+    id_min: int | None = None,
+    id_max: int | None = None,
+    created_after: str | None = None,
+    created_before: str | None = None,
+    include_actual_output: bool = False,
 ) -> str:
-    include = include_correction_types or ["approved", "edited"]
-    placeholders = ",".join("?" for _ in include)
+    raw_include = include_correction_types or ["approved", "edited"]
+    include: list[str] = []
+    seen_ct: set[str] = set()
+    for x in raw_include:
+        ct = str(x).strip().lower()
+        if not ct or ct in seen_ct:
+            continue
+        seen_ct.add(ct)
+        include.append(ct)
+    if not include:
+        include = ["approved", "edited"]
+    for ct in include:
+        if ct not in ALLOWED_CORRECTION_TYPES:
+            raise ValueError(
+                f"Invalid correction_type in export: {ct!r}. Allowed: {', '.join(sorted(ALLOWED_CORRECTION_TYPES))}"
+            )
+
+    conditions: list[str] = []
+    params: list[Any] = []
+
+    ph_ct = ",".join("?" for _ in include)
+    conditions.append(f"correction_type IN ({ph_ct})")
+    params.extend(include)
+
+    if example_ids:
+        uniq = sorted({int(x) for x in example_ids if int(x) > 0})
+        if not uniq:
+            return ""
+        if len(uniq) > TRAINING_EXPORT_MAX_IDS:
+            raise ValueError(f"Too many ids in export (max {TRAINING_EXPORT_MAX_IDS}).")
+        ph_ids = ",".join("?" for _ in uniq)
+        conditions.append(f"id IN ({ph_ids})")
+        params.extend(uniq)
+
+    if id_min is not None:
+        conditions.append("id >= ?")
+        params.append(int(id_min))
+    if id_max is not None:
+        conditions.append("id <= ?")
+        params.append(int(id_max))
+
+    ca = (created_after or "").strip()
+    cb = (created_before or "").strip()
+    if ca:
+        conditions.append("created_at >= ?")
+        params.append(ca)
+    if cb:
+        conditions.append("created_at <= ?")
+        params.append(cb)
+
     query = (
-        f"SELECT * FROM training_examples WHERE correction_type IN ({placeholders}) "
-        "ORDER BY id ASC"
+        "SELECT * FROM training_examples WHERE "
+        + " AND ".join(conditions)
+        + " ORDER BY id ASC"
     )
     with get_conn() as conn:
-        rows = conn.execute(query, include).fetchall()
+        rows = conn.execute(query, params).fetchall()
 
     lines: list[str] = []
     for row in rows:
         item = _hydrate_training_example(row)
         ideal_output = item.get("ideal_output") or item.get("actual_output") or {}
-        record = {
+        record: dict[str, Any] = {
+            "id": int(item.get("id", 0) or 0),
+            "created_at": str(item.get("created_at", "") or ""),
             "input": item.get("input_text", ""),
             "ideal_output": {
                 "category": ideal_output.get("category"),
@@ -1967,6 +3117,8 @@ def export_training_examples_jsonl(
             "context_used": item.get("context_used", []),
             "reasoning": item.get("reasoning", ""),
         }
+        if include_actual_output:
+            record["actual_output"] = item.get("actual_output") or {}
         lines.append(_json_dump(record))
     return "\n".join(lines) + ("\n" if lines else "")
 
@@ -2659,6 +3811,529 @@ def export_v1_review_csv(rows: list[dict[str, Any]]) -> str:
     text = sio.getvalue()
     sio.close()
     return text
+
+
+# ---------------------------------------------------------------------------
+# Training question bank (prompt lifecycle events)
+# ---------------------------------------------------------------------------
+QUESTION_BANK_EVENT_TYPES = frozenset(
+    {
+        "suggestion_affected",
+        "override_applied",
+        "override_superseded",
+        "override_rollback",
+    }
+)
+
+
+def insert_training_question_prompt_events(
+    rows: list[tuple[int, str, int | None, str | None, dict[str, Any]]],
+) -> None:
+    """Insert (example_id, event_type, override_id, analysis_cache_key, ref_dict)."""
+    if not rows:
+        return
+    now = _utc_now_iso()
+    with get_conn() as conn:
+        for example_id, event_type, override_id, cache_key, ref in rows:
+            if event_type not in QUESTION_BANK_EVENT_TYPES:
+                continue
+            try:
+                eid = int(example_id)
+            except (TypeError, ValueError):
+                continue
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO training_question_prompt_events (
+                    training_example_id, event_type, override_id,
+                    analysis_cache_key, ref_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    eid,
+                    event_type,
+                    override_id,
+                    cache_key,
+                    _json_dump(ref),
+                    now,
+                ),
+            )
+        conn.commit()
+
+
+def record_suggestion_affected_from_analysis_payload(
+    payload: dict[str, Any], cache_key: str
+) -> None:
+    """Log per-example suggestion coverage after an analyzer run (raw payload)."""
+    to_insert: list[tuple[int, str, int | None, str | None, dict[str, Any]]] = []
+    seen: set[int] = set()
+
+    def add_ids(ids: list[Any], ref_extra: dict[str, Any]) -> None:
+        for x in ids:
+            try:
+                eid = int(x)
+            except (TypeError, ValueError):
+                continue
+            if eid in seen:
+                continue
+            seen.add(eid)
+            ref = {"cache_key": cache_key, **ref_extra}
+            to_insert.append((eid, "suggestion_affected", None, cache_key, ref))
+
+    for idx, g in enumerate(payload.get("groups") or []):
+        if isinstance(g, dict):
+            add_ids(g.get("affected_ids") or [], {"group_index": idx})
+    for idx, r in enumerate(payload.get("rag_suggestions") or []):
+        if isinstance(r, dict):
+            add_ids(r.get("affected_ids") or [], {"rag_index": idx})
+    insert_training_question_prompt_events(to_insert)
+
+
+def _record_override_applied_events(override_id: int, example_ids: list[int]) -> None:
+    rows: list[tuple[int, str, int | None, str | None, dict[str, Any]]] = []
+    oid = int(override_id)
+    for x in example_ids or []:
+        try:
+            eid = int(x)
+        except (TypeError, ValueError):
+            continue
+        rows.append(
+            (eid, "override_applied", oid, None, {"override_id": oid}),
+        )
+    insert_training_question_prompt_events(rows)
+
+
+def _record_override_superseded_events(
+    superseded_override_id: int,
+    example_ids: list[int],
+    new_override_id: int | None,
+) -> None:
+    rows: list[tuple[int, str, int | None, str | None, dict[str, Any]]] = []
+    sid = int(superseded_override_id)
+    for x in example_ids or []:
+        try:
+            eid = int(x)
+        except (TypeError, ValueError):
+            continue
+        ref: dict[str, Any] = {"superseded_override_id": sid}
+        if new_override_id is not None:
+            ref["new_override_id"] = int(new_override_id)
+        rows.append((eid, "override_superseded", sid, None, ref))
+    insert_training_question_prompt_events(rows)
+
+
+def _record_override_rollback_events(override_id: int, example_ids: list[int]) -> None:
+    rows: list[tuple[int, str, int | None, str | None, dict[str, Any]]] = []
+    oid = int(override_id)
+    for x in example_ids or []:
+        try:
+            eid = int(x)
+        except (TypeError, ValueError):
+            continue
+        rows.append((eid, "override_rollback", oid, None, {"override_id": oid}))
+    insert_training_question_prompt_events(rows)
+
+
+def get_question_bank_claimed_example_ids(
+    active_overrides: list[dict[str, Any]] | None = None,
+) -> set[int]:
+    """IDs treated as fully claimed for question-level analyzer dedup.
+
+    Uses the junction table for live coverage and the event log for history,
+    in two single SQL queries (no Python iteration over override JSON blobs).
+    """
+    out = covered_example_ids_from_active_overrides(active_overrides)
+    if QUESTION_BANK_DEDUP_SCOPE != "include_history":
+        return out
+    try:
+        with get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT training_example_id
+                FROM training_question_prompt_events
+                WHERE event_type = 'override_applied'
+                """
+            ).fetchall()
+        for r in rows:
+            try:
+                out.add(int(r["training_example_id"]))
+            except (TypeError, ValueError):
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def question_bank_dedup_cache_tag(active_overrides: list[dict[str, Any]]) -> str:
+    """Short stable token for analyzer cache key — invalidates when claim set changes."""
+    claimed = get_question_bank_claimed_example_ids(active_overrides)
+    payload = f"{QUESTION_BANK_DEDUP_SCOPE}|" + ",".join(str(x) for x in sorted(claimed))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def list_question_bank_rows(
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    q: str | None = None,
+    only_covered: bool = False,
+    only_with_override: bool = False,
+    only_recent_hours: int | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return (rows, total_count) for the admin question bank.
+
+    Single aggregate SQL: joins ``training_examples`` to per-example event
+    counters and to the active-override coverage view, with optional filters.
+    Replaces the previous N+1 (one SELECT per example_id).
+    """
+    cutoff_iso: str | None = None
+    if only_recent_hours is not None and only_recent_hours > 0:
+        cutoff_iso = (
+            datetime.now(timezone.utc) - timedelta(hours=int(only_recent_hours))
+        ).isoformat()
+
+    q_norm = (q or "").strip().lower()
+    like_term = f"%{q_norm}%" if q_norm else None
+    where_parts: list[str] = []
+    params: list[Any] = []
+    if only_covered:
+        where_parts.append("cov.example_id IS NOT NULL")
+    if only_with_override:
+        where_parts.append(
+            "(stats.n_override_applied > 0 OR cov.example_id IS NOT NULL)"
+        )
+    if cutoff_iso:
+        where_parts.append(
+            "(stats.last_event_at >= ? OR cov.example_id IS NOT NULL)"
+        )
+        params.append(cutoff_iso)
+    if like_term:
+        where_parts.append(
+            "(LOWER(te.input_text) LIKE ? OR LOWER(te.normalized_input) LIKE ?)"
+        )
+        params.extend([like_term, like_term])
+    # Drop entries with neither activity nor coverage; this used to be the
+    # ``all_ids = set(stats) | set(active_by_example)`` filter in Python.
+    where_parts.append(
+        "(stats.last_event_at IS NOT NULL OR cov.example_id IS NOT NULL)"
+    )
+    where_sql = "WHERE " + " AND ".join(where_parts)
+
+    base = f"""
+        FROM training_examples te
+        LEFT JOIN (
+            SELECT
+                training_example_id,
+                MAX(created_at) AS last_event_at,
+                SUM(CASE WHEN event_type = 'suggestion_affected' THEN 1 ELSE 0 END) AS n_suggestion,
+                SUM(CASE WHEN event_type = 'override_applied' THEN 1 ELSE 0 END) AS n_override_applied,
+                SUM(CASE WHEN event_type = 'override_superseded' THEN 1 ELSE 0 END) AS n_superseded,
+                SUM(CASE WHEN event_type = 'override_rollback' THEN 1 ELSE 0 END) AS n_rollback
+            FROM training_question_prompt_events
+            GROUP BY training_example_id
+        ) AS stats ON stats.training_example_id = te.id
+        LEFT JOIN (
+            SELECT DISTINCT poe.example_id
+            FROM prompt_override_examples poe
+            JOIN prompt_overrides po ON po.id = poe.override_id
+            WHERE po.status = 'active'
+        ) AS cov ON cov.example_id = te.id
+        {where_sql}
+    """
+
+    with get_conn() as conn:
+        try:
+            count_row = conn.execute(
+                f"SELECT COUNT(*) AS c {base}", tuple(params)
+            ).fetchone()
+        except Exception:
+            count_row = None
+        total = int(count_row["c"]) if count_row else 0
+
+        order_limit_params = list(params) + [
+            max(1, int(limit)),
+            max(0, int(offset)),
+        ]
+        rows = conn.execute(
+            f"""
+            SELECT
+                te.id AS id,
+                te.input_text AS input_text,
+                te.normalized_input AS normalized_input,
+                stats.last_event_at AS last_event_at,
+                stats.n_suggestion AS n_suggestion,
+                stats.n_override_applied AS n_override_applied,
+                stats.n_superseded AS n_superseded,
+                stats.n_rollback AS n_rollback,
+                cov.example_id AS covered_marker
+            {base}
+            ORDER BY te.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            tuple(order_limit_params),
+        ).fetchall()
+
+        # Hydrate live override IDs per example in a single follow-up query.
+        ids_in_page = [int(r["id"]) for r in rows]
+        active_by_example: dict[int, list[int]] = {}
+        if ids_in_page:
+            placeholders = ",".join(["?"] * len(ids_in_page))
+            link_rows = conn.execute(
+                f"""
+                SELECT poe.example_id, poe.override_id
+                FROM prompt_override_examples poe
+                JOIN prompt_overrides po ON po.id = poe.override_id
+                WHERE po.status = 'active' AND poe.example_id IN ({placeholders})
+                ORDER BY poe.override_id
+                """,
+                tuple(ids_in_page),
+            ).fetchall()
+            for lr in link_rows:
+                active_by_example.setdefault(int(lr["example_id"]), []).append(
+                    int(lr["override_id"])
+                )
+
+    candidates: list[dict[str, Any]] = []
+    for r in rows:
+        eid = int(r["id"])
+        raw_text = str(r["input_text"] or "")
+        preview = raw_text[:240] + ("…" if len(raw_text) > 240 else "")
+        norm = str(r["normalized_input"] or "")
+        in_live = r["covered_marker"] is not None
+        oids_live = active_by_example.get(eid, [])
+        nh = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:12] if norm else ""
+        candidates.append(
+            {
+                "training_example_id": eid,
+                "preview": preview,
+                "normalized_hash_short": nh,
+                "last_event_at": r["last_event_at"],
+                "in_live_prompt": in_live,
+                "active_override_ids": oids_live,
+                "suggestion_affected_events": int(r["n_suggestion"] or 0),
+                "ever_override_applied": int(r["n_override_applied"] or 0) > 0,
+            }
+        )
+    return candidates, total
+
+
+# ---------------------------------------------------------------------------
+# LLM model profiles (admin-configured OpenAI-compatible endpoints)
+# ---------------------------------------------------------------------------
+def _validate_env_alias(name: str) -> bool:
+    raw = (name or "").strip()
+    return bool(raw) and bool(re.match(r"^[A-Z][A-Z0-9_]*$", raw.upper()))
+
+
+def list_llm_model_profiles(*, include_disabled: bool = False) -> list[dict[str, Any]]:
+    where = "" if include_disabled else "WHERE disabled = 0"
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM llm_model_profiles {where} ORDER BY name ASC"
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        item = dict(r)
+        item.pop("api_key_encrypted", None)
+        item["has_api_key"] = bool(item.get("env_alias") or r["api_key_encrypted"])
+        out.append(item)
+    return out
+
+
+def get_llm_model_profile(profile_id: int) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM llm_model_profiles WHERE id = ?", (int(profile_id),)
+        ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item.pop("api_key_encrypted", None)
+    item["has_api_key"] = bool(item.get("env_alias") or row["api_key_encrypted"])
+    return item
+
+
+def create_llm_model_profile(
+    *,
+    name: str,
+    base_url: str,
+    default_model: str,
+    provider: str = "openai_compatible",
+    api_key_plain: str | None = None,
+    env_alias: str | None = None,
+    api_key_encrypted: str | None = None,
+) -> dict[str, Any]:
+    from .config import ALLOW_INLINE_LLM_KEYS
+    from .llm_crypto import encrypt_secret_optional
+
+    now = _utc_now_iso()
+    alias = (env_alias or "").strip() or None
+    if alias and not _validate_env_alias(alias):
+        raise ValueError("invalid_env_alias")
+    has_inline = bool(api_key_plain and str(api_key_plain).strip()) or bool(
+        api_key_encrypted
+    )
+    if has_inline and not ALLOW_INLINE_LLM_KEYS:
+        raise ValueError("inline_llm_keys_disabled")
+    if not alias and not has_inline:
+        # An LLM profile with neither an env alias nor an inline key cannot
+        # actually authenticate against the upstream API; reject early.
+        raise ValueError("missing_credentials")
+    enc = api_key_encrypted
+    if api_key_plain and str(api_key_plain).strip():
+        enc = encrypt_secret_optional(str(api_key_plain).strip())
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO llm_model_profiles (
+                name, provider, base_url, default_model,
+                api_key_encrypted, env_alias, disabled, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+            """,
+            (
+                name.strip(),
+                (provider or "openai_compatible").strip(),
+                base_url.strip(),
+                default_model.strip(),
+                enc,
+                alias,
+                now,
+                now,
+            ),
+        )
+        pid = int(cur.lastrowid)
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM llm_model_profiles WHERE id = ?", (pid,)
+        ).fetchone()
+    item = dict(row) if row else {}
+    item.pop("api_key_encrypted", None)
+    item["has_api_key"] = bool(alias or (row and row["api_key_encrypted"]))
+    return item
+
+
+def update_llm_model_profile(
+    profile_id: int,
+    *,
+    name: str | None = None,
+    base_url: str | None = None,
+    default_model: str | None = None,
+    disabled: bool | None = None,
+    api_key_plain: str | None = None,
+    env_alias: str | None = None,
+    clear_env_alias: bool = False,
+) -> dict[str, Any] | None:
+    from .llm_crypto import encrypt_secret_optional
+
+    pid = int(profile_id)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM llm_model_profiles WHERE id = ?", (pid,)
+        ).fetchone()
+        if not row:
+            return None
+        fields: list[str] = []
+        params: list[Any] = []
+        if name is not None:
+            fields.append("name = ?")
+            params.append(name.strip())
+        if base_url is not None:
+            fields.append("base_url = ?")
+            params.append(base_url.strip())
+        if default_model is not None:
+            fields.append("default_model = ?")
+            params.append(default_model.strip())
+        if disabled is not None:
+            fields.append("disabled = ?")
+            params.append(1 if disabled else 0)
+        if clear_env_alias:
+            fields.append("env_alias = NULL")
+        elif env_alias is not None:
+            alias = env_alias.strip() or None
+            if alias and not _validate_env_alias(alias):
+                raise ValueError("invalid_env_alias")
+            fields.append("env_alias = ?")
+            params.append(alias)
+        if api_key_plain is not None and str(api_key_plain).strip():
+            from .config import ALLOW_INLINE_LLM_KEYS
+
+            if not ALLOW_INLINE_LLM_KEYS:
+                raise ValueError("inline_llm_keys_disabled")
+            enc = encrypt_secret_optional(str(api_key_plain).strip())
+            fields.append("api_key_encrypted = ?")
+            params.append(enc)
+        if not fields:
+            conn.commit()
+        else:
+            fields.append("updated_at = ?")
+            params.append(_utc_now_iso())
+            params.append(pid)
+            conn.execute(
+                f"UPDATE llm_model_profiles SET {', '.join(fields)} WHERE id = ?",
+                tuple(params),
+            )
+            conn.commit()
+        row2 = conn.execute(
+            "SELECT * FROM llm_model_profiles WHERE id = ?", (pid,)
+        ).fetchone()
+    if not row2:
+        return None
+    item = dict(row2)
+    item.pop("api_key_encrypted", None)
+    item["has_api_key"] = bool(item.get("env_alias") or row2["api_key_encrypted"])
+    return item
+
+
+def delete_llm_model_profile(profile_id: int) -> bool:
+    pid = int(profile_id)
+    with get_conn() as conn:
+        conn.execute("DELETE FROM llm_task_defaults WHERE profile_id = ?", (pid,))
+        cur = conn.execute("DELETE FROM llm_model_profiles WHERE id = ?", (pid,))
+        conn.commit()
+        return int(cur.rowcount or 0) > 0
+
+
+def get_llm_task_default_profile_id(task: str) -> int | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT profile_id FROM llm_task_defaults WHERE task = ?",
+            (task.strip(),),
+        ).fetchone()
+    if not row or row["profile_id"] is None:
+        return None
+    return int(row["profile_id"])
+
+
+def set_llm_task_default(task: str, profile_id: int | None) -> None:
+    t = task.strip()
+    with get_conn() as conn:
+        if profile_id is None:
+            conn.execute("DELETE FROM llm_task_defaults WHERE task = ?", (t,))
+        else:
+            conn.execute(
+                """
+                INSERT INTO llm_task_defaults (task, profile_id)
+                VALUES (?, ?)
+                ON CONFLICT(task) DO UPDATE SET profile_id = excluded.profile_id
+                """,
+                (t, int(profile_id)),
+            )
+        conn.commit()
+
+
+def list_llm_task_defaults() -> dict[str, int | None]:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT task, profile_id FROM llm_task_defaults").fetchall()
+    return {str(r["task"]): (int(r["profile_id"]) if r["profile_id"] is not None else None) for r in rows}
+
+
+def fetch_llm_profile_row_for_resolve(profile_id: int) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM llm_model_profiles WHERE id = ? AND disabled = 0",
+            (int(profile_id),),
+        ).fetchone()
 
 
 def write_v1_dataset_files(base_dir: str) -> dict[str, Any]:

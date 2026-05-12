@@ -1,71 +1,89 @@
 # Manager/Admin Guide
 
-This guide maps "manager" responsibilities to the current `admin` role in the app.
+Language: **English** | [Nederlands](README_managers.nl.md)
 
-## Access
+This guide maps manager responsibilities to the current `admin` role.
 
-- Sign in with an account that has role `admin`.
-- Main work areas:
-  - `/dashboard` - ticket metrics and operations
-  - `/admin` - document, user, and knowledge-gap management
+## Core work areas
 
-## Ticket operations
+- `/dashboard` - ticket monitoring and operations
+- `/admin` - docs, users, knowledge gaps, uploads, reindex
+- `/admin/training` - training example review
+- `/admin/training-quality` - evaluation and prompt-quality loop
+- `/admin/llm` - LLM profile configuration by task
+
+## Ticket operations (daily)
 
 On dashboard you can:
+
 - view all tickets
 - filter by category/priority/status
-- sort and paginate
-- open ticket details
+- sort and paginate results
+- open detailed ticket side panel
 - change ticket status (`Open`, `In Progress`, `Resolved`)
-- export current ticket dataset to CSV
+- export current filtered view to CSV
 
-## What to monitor daily
+## Daily KPI checklist
 
-- Count of `URGENT` tickets
-- Tickets stuck in `Open`
-- Category spikes (Safety, Plumbing, HVAC)
-- Recurring summaries (same issue pattern)
+- count of `URGENT` tickets
+- tickets stuck in `Open`
+- spikes by category (Safety, Plumbing, HVAC, Electrical)
+- recurring issue summaries
 
-## Knowledge management
+## Knowledge operations
 
-In Admin panel you can:
-- list/edit/create/delete FM docs
-- upload `.txt/.md/.csv/.pdf/.docx`
-- run reindex after content updates
-- review and resolve knowledge gaps
+In `/admin` you can:
 
-Recommended process:
-1. Check new knowledge gaps.
-2. Confirm missing/incorrect policy or data.
-3. Add/patch document content.
-4. Reindex.
-5. Validate with targeted chat prompts or test subset.
+- list/create/edit/delete FM docs
+- upload `.txt`, `.md`, `.csv`, `.pdf`, `.docx`
+- trigger reindex after content updates
+- review/resolve knowledge gaps
 
-## User administration
+Recommended sequence:
 
-Admin panel supports:
+1. review new knowledge gaps
+2. verify missing or incorrect policy/data
+3. update document content
+4. run reindex
+5. validate by targeted prompts or test subset
+
+## User and access management
+
+Admin controls include:
+
 - role changes (`user` / `admin`)
 - activation/deactivation
-- optional email management (notifications)
+- optional email metadata
 
-Guardrails:
-- system always requires at least one active admin.
+Guardrail: there must always be at least one active admin account.
 
-## Training-data review workflow
+For **privacy, retention, and GDPR-oriented erasure** of chat + training data (not tickets), see [`gdpr_data_retention.md`](gdpr_data_retention.md).
 
-Admin endpoints and panel workflow support:
-- reviewing logged training examples
-- marking `approved`, `edited`, or `rejected`
-- adding `human_notes`
-- setting `ideal_output`
-- exporting curated JSONL for fine-tuning
+## Training and quality workflow
 
-See data format and governance in `docs/fine_tuning_data.md`.
+### Training review (`/admin/training`)
 
-## Operational KPIs
+- review captured examples
+- mark as `approved`, `edited`, or `rejected`
+- add `human_notes`
+- refine `ideal_output`
 
-Track separately:
-- all-case pass rate (includes infrastructure effects)
-- `api_ok_only` pass rate (model/logic quality)
+### Quality loop (`/admin/training-quality`)
 
-Testing runbook: `backend/test_runbook.md`.
+- run evaluations
+- inspect mismatch groups
+- analyze suggestions
+- apply/rollback/consolidate prompt overrides
+- replay changes against affected examples
+
+See also:
+
+- [`docs/fine_tuning_data.md`](fine_tuning_data.md)
+- [`backend/test_runbook.md`](../backend/test_runbook.md)
+
+## Operational metrics
+
+Track both:
+
+- all-case pass rate (includes infra/API failures)
+- `api_ok_only` pass rate (model and logic quality)

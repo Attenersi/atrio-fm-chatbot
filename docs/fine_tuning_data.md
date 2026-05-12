@@ -113,6 +113,10 @@ portable backup/export snapshot, but not as a runtime source for FM Review.
 - Avoid contradictory labels (for example, `create_ticket=false` with incident-only response).
 - For safety-adjacent cases, enforce consistent category/priority policy.
 
+## GDPR, retention, and erasure
+
+Chat-derived rows in `training_examples` can include **personal data** (verbatim queries, `user_id`, outputs, reviewer notes). For EU deployments, see **[`gdpr_data_retention.md`](gdpr_data_retention.md)** for lawful bases, retention expectations, subprocessors/transfers, and the **admin erasure** endpoint for chat + training rows by `user_id`. Treat JSONL/CSV exports like any other sensitive dataset: **pseudonymize** before sharing with model trainers and avoid shipping **production** DB copies off-environment without policy.
+
 ## Governance checklist before export
 
 - Spot-check at least 50 recent approved/edited records.

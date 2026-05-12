@@ -1,99 +1,127 @@
 # Developer Guide
 
-## What this project is
+Language: **English** | [Nederlands](README_developers.nl.md)
 
-FM chatbot platform with:
-- Next.js frontend (`frontend/`)
-- FastAPI backend (`backend/`)
-- RAG over FM docs (`backend/docs_fm/`)
-- ticketing and admin workflows
-- quality test suite (`backend/test_rag.py`)
+**Full documentation index**: [`documentation_map.md`](documentation_map.md)
 
-## Local setup (Windows / PowerShell)
+## Project overview
 
-### Backend
+FM chatbot stack:
 
-```powershell
+- frontend: Next.js app (`frontend/`)
+- backend: FastAPI service (`backend/`)
+- operational DB: SQLite
+- vector DB: Chroma (RAG retrieval)
+- LLM integration: OpenAI-compatible provider
+
+## Local setup (Docker-only)
+
+Prerequisites: Docker with Compose, and `backend/.env` from `backend/.env.example`.
+
+```bash
+docker compose up --build
+```
+
+Ingest or reindex after document changes:
+
+```bash
+docker compose exec backend python -m app.ingest
+```
+
+## Backend Python environment (uv)
+
+Reproducible installs use **[uv](https://docs.astral.sh/uv/)** and a lockfile:
+
+- Metadata: [`backend/pyproject.toml`](../backend/pyproject.toml)
+- Lock: [`backend/uv.lock`](../backend/uv.lock) (commit this file)
+- CI runs `uv sync --frozen --group dev` then `uv run …` for ruff, mypy, pytest, pip-audit
+
+Local commands (from `backend/`):
+
+```bash
+uv sync --group dev
+uv run pytest tests -q
+```
+
+Runtime dependencies for **Docker** and **pip-only** workflows are pinned in [`backend/requirements.txt`](../backend/requirements.txt). Regenerate after dependency changes:
+
+```bash
 cd backend
-python -m venv venv
-.\venv\Scripts\activate
-pip install -r requirements.txt
+uv lock
+uv export --format requirements-txt --no-hashes --no-dev -o requirements.txt
 ```
 
-Create `backend/.env` with valid NVIDIA credentials and paths.
+## Architecture and request flow
 
-### Frontend
+See **[`docs/architecture.md`](architecture.md)** for the canonical Mermaid diagrams (system context + chat sequence). Do not duplicate that narrative in other docs; link here.
 
-```powershell
-cd ..\frontend
-npm install
-```
+### Main backend modules
 
-Set `frontend/.env.local`:
+- `backend/app/main.py` - API routes and orchestration
+- `backend/app/rag.py` - retrieval and generation pipeline
+- `backend/app/classifier.py` - output parsing and normalization
+- `backend/app/database.py` - schema and persistence
+- `backend/app/ingest.py` - document ingestion and embeddings
+- `backend/app/prompt_analyzer.py` - suggestion generation
+- `backend/app/prompt_consolidator.py` - merge helpers
+- `backend/app/prompt_replay.py` - replay testing helpers
+- `backend/app/llm_profiles.py` - provider profile management
 
-```env
-NEXT_PUBLIC_API_URL=http://localhost:8000
-```
+## API and OpenAPI
 
-### Ingest docs and run
+FastAPI serves the **live** OpenAPI contract (always matches running code):
 
-```powershell
-cd ..\backend
-.\venv\Scripts\python.exe -m app.ingest
-.\venv\Scripts\python.exe -m app.main
-```
+- **Swagger UI**: `http://localhost:8000/docs`
+- **ReDoc**: `http://localhost:8000/redoc`
+- **OpenAPI JSON**: `http://localhost:8000/openapi.json`
 
-In another terminal:
+With default Docker Compose ports, use the same paths on **port 8000** on the host.
 
-```powershell
-cd frontend
-npm run dev
-```
-
-## Key backend flows
-
-### Chat request path
-
-1. `/api/chat` receives message and history.
-2. `retrieve_with_sources()` pulls doc chunks from Chroma.
-3. `generate()` returns structured JSON from LLM.
-4. `_finalize_chat_payload()` applies deterministic safety/business rules.
-5. Optional ticket is created and query is logged to training examples.
-
-### Streaming path
-
-`/api/chat/stream` emits chunks, then final payload using the same finalization logic.
+Route groups (for orientation only — prefer `/docs` for details): health (`/health*`), auth (`/api/auth/*`), chat (`/api/chat*`), tickets (`/api/tickets*`), admin (`/api/admin/*`), training quality (`/api/admin/training-quality/*`), LLM profiles (`/api/admin/llm/*`).
 
 ## Where to change behavior
 
-- Prompt/RAG rules: `backend/app/rag.py`
-- Parsing fallback/strictness: `backend/app/classifier.py`
-- Heuristics for category/priority/ticketing: `backend/app/main.py`
-- Data persistence/schema: `backend/app/database.py`
+- prompt composition and retrieval: `backend/app/rag.py`
+- parsing/fallback handling: `backend/app/classifier.py`
+- ticket heuristics and final payload rules: `backend/app/main.py`
+- db schema and migrations: `backend/app/database.py`, `backend/app/db_migrations.py`
 
-## Testing and evaluation
+## CI
 
-Run full suite:
+GitHub Actions (ruff, mypy, pytest, frontend lint/typecheck/audit, optional Docker eval): [`ci.md`](ci.md).
 
-```powershell
-cd backend
-.\venv\Scripts\python.exe -u test_rag.py --cases-file atrio_test_cases.json --output test_results_full.json
+## Security / RAG trust
+
+Prompt injection and deterministic guardrails: [`prompt_injection_and_guardrails.md`](prompt_injection_and_guardrails.md).
+
+## Quality workflow
+
+### Evaluation
+
+```bash
+docker compose exec backend python -u test_rag.py --cases-file atrio_test_cases.json --output test_results_full.json
 ```
 
-Recommended interpretation:
-- `pass_rate` (all)
-- `api_ok_pass_rate` (logic only when API responded)
+Read both:
 
-See `backend/test_runbook.md` for timeout/retry strategy and reruns.
+- `pass_rate` (all outcomes)
+- `api_ok_pass_rate` (logic quality when API succeeds)
 
-## Adding new FM knowledge
+### Admin quality loop
 
-1. Add or edit docs in `backend/docs_fm/`
+In `/admin/training-quality`:
+
+- run eval
+- inspect mismatch groups
+- analyze suggestions
+- apply/rollback/consolidate prompt overrides
+- replay affected examples
+
+## Adding/updating FM knowledge
+
+1. Edit files in `backend/docs_fm/` (or configured docs dir)
 2. Reindex (`python -m app.ingest` or admin reindex endpoint)
-3. Re-run selected tests
-4. Review knowledge gaps in admin panel
+3. Run targeted tests
+4. Validate via chat and knowledge-gap backlog
 
-## Fine-tuning data lifecycle
-
-Every processed query is captured as a training-example candidate.
-Spec and review workflow: `docs/fine_tuning_data.md`.
+Architecture, schema, training-data lifecycle, test runbook, and validation hubs are all linked from [`documentation_map.md`](documentation_map.md).

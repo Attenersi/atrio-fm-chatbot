@@ -64,3 +64,8 @@ c/o Meridian Business Center
 Graanstraat 12, Suite [number]
 4811 JD Breda
 Netherlands
+
+Topics Not Handled by Facility Management
+The following are handled by other parties — FM can provide contact information:
+TopicWho to ContactContactLease, rent, contractsVestia Vastgoedbeheerproperty@vestia-breda.nl, +31 (0)76 555 0200Building ownership questionsBuilding ownereigenaar@meridian-breda.nlBilling / service charge disputesProperty managerproperty@vestia-breda.nlInsurance claims (building)Building owner's insurer (via FM)j.vandijk@vandalenfm.nlCatering ordersCatering Culinairecatering@meridian-breda.nlIT credentials / WiFiCloudCT (via email)it@meridian-breda.nlPrivacy / data requestsBuilding owner (data controller)privacy@meridian-breda.nl
+FM will gladly help you reach the right contact.

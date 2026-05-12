@@ -1,47 +1,62 @@
 # User Guide
 
+Language: **English** | [Nederlands](README_users.nl.md)
+
 ## What this assistant can do
 
-The FM assistant helps with:
-- building information (hours, access, facilities)
-- maintenance issues (HVAC, plumbing, electrical, general faults)
-- safety incidents
-- follow-up guidance
+The FM assistant supports:
+
+- building information (hours, access, spaces, policies)
+- maintenance incidents (HVAC, plumbing, electrical, safety, general)
+- follow-up guidance after initial reports
+- automatic ticket creation when a real issue is detected
 
 ## What happens when you send a message
 
-1. Assistant checks building documentation.
-2. It answers your question and classifies issue severity.
-3. If needed, it creates a maintenance ticket automatically.
-4. You see confirmation and ticket ID when a ticket is created.
+1. The backend retrieves relevant building documentation.
+2. The LLM generates a structured answer (category, priority, response).
+3. Business rules decide whether a ticket should be created.
+4. You receive the response and ticket confirmation (if created).
 
-## How to report issues well
+## How to write effective reports
 
 Include:
-- exact location (floor, room, suite)
+
+- exact location (building/floor/room)
 - what happened
 - when it started
 - whether it is recurring
-- safety risk indicators (smell, smoke, water, sparks)
+- any safety indicators (smell, smoke, leaks, sparks)
 
 Example:
-"Suite 305 heating is not working since this morning. It is the third day in a row and room temp is 16C."
 
-## Informational vs ticket requests
+`Suite 305 heating stopped this morning. Third day in a row. Room temperature is 16C.`
 
-- Informational questions (numbers, policies, building rules) should not create tickets.
-- Operational incidents and service requests should create tickets.
+## Informational vs ticket-worthy messages
 
-## Follow-up messages
+- Informational requests usually should not create a ticket.
+- Service incidents and faults should create a ticket.
 
-If you ask for status updates (for example, "Any update on my AC issue?"), the assistant should treat this as follow-up, not a new fault report.
+## Follow-up behavior
 
-## Safety emergencies
+Messages like `Any update on my AC issue?` should be treated as follow-up context, not a new fault report.
 
-For urgent life-safety situations, follow emergency procedures first.
-Use the assistant for logging/support, but do not delay emergency action.
+## Safety notice
+
+For life-safety emergencies, follow emergency procedures first.
+Use the assistant for logging and support, not as a replacement for emergency response.
+
+## In-app pages you will use
+
+- `/chat` - ask questions and report incidents
+- `/dashboard` - review your tickets and statuses
+- `/help` - in-app guidance
 
 ## Limits
 
-- Assistant only covers facility-management scope.
-- If documentation is missing, response may indicate that info is unavailable and can be added by admin.
+- The assistant is limited to facility-management scope.
+- If knowledge is missing in docs, the answer may be partial until admins update content and reindex.
+
+## Privacy (summary)
+
+Your messages may be stored to operate the service and, depending on organization policy, for training-data review. Details and retention expectations for EU-style deployments: [`gdpr_data_retention.md`](gdpr_data_retention.md) (your organization’s privacy notice remains the primary source).

@@ -1,92 +1,108 @@
 # Backend
 
-FastAPI service for authentication, chat orchestration, ticketing, admin operations,
-knowledge-gap handling, and training-data logging.
+Language: **English** | [Nederlands](README.nl.md)
 
-## Setup
+FastAPI service for:
 
-```powershell
-python -m venv venv
-.\venv\Scripts\activate
-pip install -r requirements.txt
+- auth and session handling
+- chat orchestration (sync and stream)
+- ticket CRUD and status changes
+- admin operations (users, docs, gaps, training quality)
+- training-data capture and review workflows
+
+**Architecture (diagrams)**: [`docs/architecture.md`](../docs/architecture.md). **SQLite tables**: [`docs/schema.md`](../docs/schema.md).
+
+## Setup (Docker-only)
+
+Use root-level Compose:
+
+```bash
+docker compose up --build
 ```
+
+The frontend image bakes **`NEXT_PUBLIC_API_URL` at build time**. Override the default (`http://localhost:8000`) when building, for example:
+
+```bash
+set NEXT_PUBLIC_API_URL=http://192.168.1.10:8000
+docker compose build --no-cache frontend
+docker compose up -d
+```
+
+(On Unix: `export NEXT_PUBLIC_API_URL=...`.)
+
+Optional **hot reload**: copy [`docker-compose.override.yml.example`](../docker-compose.override.yml.example) to `docker-compose.override.yml` in the repo root; Compose merges it automatically (`backend` `--reload`, `frontend` `next dev`).
 
 ## Environment
 
-Create `backend/.env` and configure at minimum:
+Create `backend/.env` from `backend/.env.example`.
 
-- `NVIDIA_API_KEY`
-- `NVIDIA_BASE_URL` (default is NVIDIA OpenAI-compatible endpoint)
+Required (typical):
+
+- `LLM_API_KEY` (or legacy `NVIDIA_API_KEY`)
+- `LLM_BASE_URL` (or legacy `NVIDIA_BASE_URL`)
 - `LLM_MODEL`
 - `EMBED_MODEL`
 - `DOCS_DIR`
 - `CHROMA_DIR`
 - `SQLITE_DB_PATH`
-- `ADMIN_USERNAME` / `ADMIN_PASSWORD`
+- `ADMIN_USERNAME`
+- `ADMIN_PASSWORD`
 
 Optional:
-- SMTP settings (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM`)
-- bootstrap non-admin account (`AUTH_BOOTSTRAP_USER_USERNAME`, `AUTH_BOOTSTRAP_USER_PASSWORD`)
 
-Start from `backend/.env.example` and keep real secrets only in local `.env`.
+- SMTP (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM`)
+- bootstrap user (`AUTH_BOOTSTRAP_USER_USERNAME`, `AUTH_BOOTSTRAP_USER_PASSWORD`)
 
-## Run service
+## Run
 
-Development:
+Backend runs via Docker Compose (`backend` service in `docker-compose.yml`).
 
-```powershell
-.\venv\Scripts\python.exe -m app.main
+## Ingest documents
+
+```bash
+docker compose exec backend python -m app.ingest
 ```
 
-Alternative:
-
-```powershell
-uvicorn app.main:app --reload --port 8000
-```
-
-## Ingest docs
-
-```powershell
-.\venv\Scripts\python.exe -m app.ingest
-```
-
-This rebuilds the Chroma index from files in `docs_fm/` (or your configured `DOCS_DIR`).
+This rebuilds the vector index from `docs_fm/` (or configured docs path).
 
 ## Core modules
 
-- `app/main.py` - FastAPI routes and chat/ticket orchestration
-- `app/rag.py` - retrieval and generation prompt pipeline
-- `app/classifier.py` - LLM JSON parsing/fallback
-- `app/database.py` - SQLite schema and CRUD
-- `app/ingest.py` - document chunking and embedding
-- `app/llm.py` - NVIDIA chat/embed client wrappers
+- `app/main.py` - API routes + orchestration
+- `app/rag.py` - retrieval and generation pipeline
+- `app/classifier.py` - parsing/normalization of model output
+- `app/database.py` - SQLite schema and queries
+- `app/ingest.py` - chunking and embedding ingestion
+- `app/llm.py` - LLM and embedding API wrappers
+- `app/prompt_analyzer.py` - suggestion analysis
+- `app/prompt_consolidator.py` - rule merge helpers
+- `app/prompt_replay.py` - replay evaluation helpers
 
-## API areas
+## API and OpenAPI
 
-- Auth/session: `/api/auth/*`
-- Chat: `/api/chat`, `/api/chat/stream`
-- Tickets: `/api/tickets*`
-- Admin docs/users/reindex: `/api/admin/*`
-- Knowledge gaps: `/api/admin/knowledge-gaps*`
-- Training examples (fine-tuning pipeline): `/api/admin/training-examples*`
+Interactive API docs (generated from the running app):
+
+- `http://localhost:8000/docs` (Swagger UI)
+- `http://localhost:8000/redoc` (ReDoc)
+
+Use these instead of static route lists. High-level grouping is also summarized in [`docs/README_developers.md`](../docs/README_developers.md).
 
 ## Quality testing
 
-Use `test_rag.py` with `atrio_test_cases.json`.
-Runbook: `test_runbook.md`.
+Run evaluation:
 
-## Maintenance scripts
+```bash
+docker compose exec backend python -u test_rag.py --cases-file atrio_test_cases.json --output test_results_full.json
+```
 
-Reusable backend maintenance utilities are in `backend/scripts/`.
-Legacy root entrypoints (for compatibility) may call into this folder.
+Track:
 
-## Publish safety and second computer setup
+- `pass_rate`
+- `api_ok_pass_rate` / `api_ok_only`
 
-See `docs/github_publish_checklist.md` for:
-- security/privacy pre-push checklist,
-- what is needed to keep running on this computer,
-- what is required to run on a second computer.
+Reference: `backend/test_runbook.md`.
 
-Focus on both:
-- all-case pass rate
-- `api_ok_only` pass rate
+## Maintenance notes
+
+- Utilities: `backend/scripts/`
+- Migrations/helpers: `backend/app/db_migrations.py`
+- Publish safety checklist: `../docs/github_publish_checklist.md`

@@ -27,7 +27,8 @@ export default function AuthHomePage() {
     if (u.searchParams.get("registered") === "1") {
       setMessage("Account created. Sign in now.");
       u.searchParams.delete("registered");
-      const next = u.pathname + (u.searchParams.toString() ? `?${u.searchParams}` : "");
+      const next =
+        u.pathname + (u.searchParams.toString() ? `?${u.searchParams}` : "");
       window.history.replaceState({}, "", next || u.pathname);
     }
   }, []);
@@ -65,14 +66,27 @@ export default function AuthHomePage() {
         <h1 style={{ textAlign: "center", marginBottom: 0 }}>Sign in</h1>
         <form onSubmit={onSubmit} className="panel-grid">
           <label htmlFor="auth-username">Username</label>
-          <input id="auth-username" className="field" value={username} onChange={(e) => setUsername(e.target.value)} />
+          <input
+            id="auth-username"
+            className="field"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+          />
           <label htmlFor="auth-password">Password</label>
-          <input id="auth-password" type="password" className="field" value={password} onChange={(e) => setPassword(e.target.value)} />
+          <input
+            id="auth-password"
+            type="password"
+            className="field"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
           {message ? (
             <p
               style={{
                 margin: 0,
-                color: message.includes("created") ? "var(--color-success)" : "var(--color-action-danger)",
+                color: message.includes("created")
+                  ? "var(--color-success)"
+                  : "var(--color-action-danger)",
               }}
             >
               {message}

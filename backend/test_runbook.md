@@ -10,7 +10,8 @@
 ## Stable test procedure
 
 1. Start backend once and avoid edits during run:
-   - `venv\Scripts\python.exe -m app.main`
+   - **Windows (PowerShell):** `.\venv\Scripts\python.exe -m app.main`
+   - **macOS / Linux:** `./venv/bin/python -m app.main` (or `source venv/bin/activate` then `python -m app.main`)
 2. Keep frontend running separately (`npm run dev`) for manual checks.
 3. Run tests with conservative limits (defaults in `test_rag.py` are tuned for slow NVIDIA):
    - `--sleep-between 15` (default)

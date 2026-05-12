@@ -88,6 +88,34 @@ def notify_ticket_created(ticket: dict[str, Any], creator_username: str | None) 
     send_plain_text(_admin_recipients(), subj, body)
 
 
+def notify_tickets_created_batch(
+    tickets: list[dict[str, Any]], creator_username: str | None
+) -> None:
+    """Single email listing several tickets from one chat turn (multi-issue message)."""
+    if not tickets or not mail_configured():
+        return
+    if len(tickets) == 1:
+        notify_ticket_created(tickets[0], creator_username)
+        return
+    if not any(_should_notify_new_ticket(str(t.get("priority", ""))) for t in tickets):
+        return
+    who = creator_username or "unknown"
+    ids = ", ".join(str(t.get("id")) for t in tickets)
+    subj = f"[Atrio FM] New tickets ({len(tickets)}): {ids}"
+    lines = [
+        f"{len(tickets)} maintenance tickets were created from one user message.\n",
+        f"Created by: {who}\n",
+    ]
+    for t in tickets:
+        lines.append(
+            f"\n--- #{t.get('id')} | {t.get('priority')} | {t.get('category')} ---\n"
+            f"Summary: {t.get('issue_summary', '')}\n"
+            f"Department: {t.get('department')}\n"
+        )
+    lines.append(f"\nShared message (excerpt):\n{str(tickets[0].get('message', ''))[:1200]}\n")
+    send_plain_text(_admin_recipients(), subj, "".join(lines))
+
+
 def notify_ticket_status_changed(
     ticket_before: dict[str, Any],
     ticket_after: dict[str, Any],

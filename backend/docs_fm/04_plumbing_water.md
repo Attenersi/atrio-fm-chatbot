@@ -85,3 +85,16 @@ If you notice any taps or showers that have not been used in more than a week, p
 - Bathroom deep clean: Weekly (Saturdays)
 - Dishwasher descaling: Quarterly
 - Pipe inspection (camera): Every 5 years (next: 2029)
+
+Quooker Boiling Water Tap — Safety Information
+The Quooker Fusion tap in each kitchen provides instant 100°C boiling water.
+Safety features:
+
+- Push-and-turn activation (child lock) — you must push the handle down and turn simultaneously
+- The boiling water spout is insulated — the tap itself does not get hot
+- Water comes out as a fine spray, not a solid stream, reducing splash risk
+- A red ring light indicates the boiling water function is active
+
+If the Quooker is not dispensing water, shows a red light, or makes clicking sounds:
+this usually means the tank is empty and refilling (wait 10 minutes) or the filter
+needs replacement. Report to FM for service — do not attempt to repair.

@@ -6,8 +6,8 @@ Use this checklist before publishing the repository.
 
 - Keep real secrets only in local `backend/.env` (never commit this file).
 - Rotate any previously exposed keys/tokens:
-  - `NVIDIA_API_KEY`
-  - `NVIDIA_EMBED_API_KEY`
+  - `LLM_API_KEY` (or legacy `NVIDIA_API_KEY`)
+  - `LLM_EMBED_API_KEY` (or legacy `NVIDIA_EMBED_API_KEY`)
   - `ADMIN_TOKEN`
   - any real admin/user passwords
 - Use `backend/.env.example` as the public template.
@@ -68,7 +68,7 @@ When you actually deploy the backend to a public URL, set these env vars in
   default `user` account, or set a strong unique value if you intentionally
   want a seed account.
 - `ADMIN_PASSWORD` — never deploy with the placeholder/default value.
-- Rotate `NVIDIA_API_KEY` and `NVIDIA_EMBED_API_KEY` if they ever appeared in
+- Rotate `LLM_API_KEY` / `LLM_EMBED_API_KEY` (or legacy `NVIDIA_*`) if they ever appeared in
   a shared env file or screenshot.
 
 Cross-device dev (testing the frontend from a phone over the LAN):
@@ -76,3 +76,14 @@ Cross-device dev (testing the frontend from a phone over the LAN):
 - Set `CORS_ALLOW_ORIGIN_REGEX` explicitly, e.g.
   `^https?://(localhost|127\\.0\\.0\\.1|192\\.168\\.\\d{1,3}\\.\\d{1,3}|[a-zA-Z0-9.-]+\\.local)(:\\d+)?$`,
   otherwise the browser will block requests from `192.168.x.x` to the backend.
+
+## 8) Repository hygiene (public GitHub)
+
+Before or as part of going public, ensure these **root-level** files exist and are accurate (they are also indexed from [`documentation_map.md`](documentation_map.md)):
+
+- **`LICENSE`** — terms under which others may use the code.
+- **`CONTRIBUTING.md`** — how to report issues, propose changes, and submit PRs.
+- **`CODE_OF_CONDUCT.md`** — community expectations.
+- **`SECURITY.md`** — how to report vulnerabilities privately; especially important here because the app handles auth, sessions, and operational data patterns that deserve a clear disclosure channel.
+
+Review them for project-specific contact paths (maintainer email, org security URL) and keep them in sync with your actual support process.

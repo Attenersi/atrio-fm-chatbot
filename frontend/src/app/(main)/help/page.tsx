@@ -1,50 +1,19 @@
 "use client";
 
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { getSession } from "../../../lib/api";
+import helpEn from "../../../i18n/messages/help.en.json";
+import helpNl from "../../../i18n/messages/help.nl.json";
+import { useI18n } from "../../../i18n/I18nProvider";
 
-type HelpSection =
-  | "overview"
-  | "chat"
-  | "dashboard"
-  | "gaps"
-  | "documents"
-  | "training"
-  | "quality";
+type HelpSection = (typeof helpEn.tabOrder)[number];
 
-const TABS: { id: HelpSection; label: string }[] = [
-  { id: "overview", label: "Overview" },
-  { id: "chat", label: "Chat" },
-  { id: "dashboard", label: "Tickets" },
-  { id: "gaps", label: "Knowledge gaps" },
-  { id: "documents", label: "Documents" },
-  { id: "training", label: "Training review" },
-  { id: "quality", label: "Training quality" },
-];
-
-const surface: CSSProperties = {
-  border: "1px solid var(--border)",
-  borderRadius: 10,
-  background: "var(--surface)",
-  padding: 14,
-};
-
-const h2: CSSProperties = {
-  fontSize: "1.05rem",
-  fontWeight: 600,
-  margin: "24px 0 10px",
-  color: "var(--color-heading, var(--text))",
-};
-
-const h3: CSSProperties = {
-  fontSize: "0.95rem",
-  fontWeight: 600,
-  margin: "16px 0 8px",
-};
-
-const p: CSSProperties = { margin: "0 0 12px", lineHeight: 1.55, fontSize: 15 };
+function calloutTone(t: string): "info" | "warn" | "danger" {
+  if (t === "warn" || t === "danger") return t;
+  return "info";
+}
 
 function Callout({
   tone,
@@ -55,38 +24,15 @@ function Callout({
   title: string;
   children: ReactNode;
 }) {
-  const map = {
-    info: {
-      bg: "var(--chip-info-bg)",
-      border: "var(--chip-info-border)",
-      color: "var(--chip-info-text)",
-    },
-    warn: {
-      bg: "var(--chip-warn-bg)",
-      border: "var(--chip-warn-border)",
-      color: "var(--chip-warn-text)",
-    },
-    danger: {
-      bg: "var(--chip-danger-bg)",
-      border: "var(--chip-danger-border)",
-      color: "var(--chip-danger-text)",
-    },
-  } as const;
-  const t = map[tone];
+  const toneClass =
+    tone === "warn"
+      ? "help-callout--warn"
+      : tone === "danger"
+        ? "help-callout--danger"
+        : "help-callout--info";
   return (
-    <div
-      style={{
-        margin: "14px 0",
-        padding: "12px 14px",
-        borderRadius: 10,
-        border: `1px solid ${t.border}`,
-        background: t.bg,
-        color: t.color,
-        fontSize: 14,
-        lineHeight: 1.5,
-      }}
-    >
-      <strong style={{ display: "block", marginBottom: 6 }}>{title}</strong>
+    <div className={`help-callout ${toneClass}`}>
+      <strong className="help-callout__title">{title}</strong>
       {children}
     </div>
   );
@@ -94,11 +40,9 @@ function Callout({
 
 function Steps({ items }: { items: string[] }) {
   return (
-    <ol style={{ margin: "0 0 16px", paddingLeft: 22, lineHeight: 1.55, fontSize: 14 }}>
+    <ol className="help-steps">
       {items.map((s) => (
-        <li key={s} style={{ marginBottom: 6 }}>
-          {s}
-        </li>
+        <li key={s}>{s}</li>
       ))}
     </ol>
   );
@@ -106,49 +50,20 @@ function Steps({ items }: { items: string[] }) {
 
 function DataTable({ headers, rows }: { headers: string[]; rows: string[][] }) {
   return (
-    <div style={{ overflowX: "auto", margin: "12px 0 20px" }}>
-      <table
-        style={{
-          width: "100%",
-          borderCollapse: "collapse",
-          fontSize: 13,
-          border: "1px solid var(--border)",
-          borderRadius: 10,
-          overflow: "hidden",
-        }}
-      >
+    <div className="help-table-wrap">
+      <table className="help-table">
         <thead>
-          <tr style={{ background: "var(--surface-muted)" }}>
+          <tr>
             {headers.map((h) => (
-              <th
-                key={h}
-                style={{
-                  textAlign: "left",
-                  padding: "10px 12px",
-                  borderBottom: "1px solid var(--border)",
-                  fontWeight: 600,
-                  color: "var(--muted)",
-                }}
-              >
-                {h}
-              </th>
+              <th key={h}>{h}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {rows.map((row, i) => (
-            <tr key={i} style={{ background: i % 2 ? "var(--surface-muted)" : "var(--surface)" }}>
+            <tr key={i}>
               {row.map((cell, j) => (
-                <td
-                  key={j}
-                  style={{
-                    padding: "10px 12px",
-                    borderBottom: "1px solid var(--border)",
-                    verticalAlign: "top",
-                  }}
-                >
-                  {cell}
-                </td>
+                <td key={j}>{cell}</td>
               ))}
             </tr>
           ))}
@@ -160,28 +75,28 @@ function DataTable({ headers, rows }: { headers: string[]; rows: string[][] }) {
 
 function Card({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div style={surface}>
-      <div
-        style={{
-          fontSize: 11,
-          fontWeight: 600,
-          textTransform: "uppercase",
-          letterSpacing: "0.04em",
-          color: "var(--muted)",
-          marginBottom: 8,
-        }}
-      >
-        {title}
-      </div>
-      <div style={{ fontSize: 14, lineHeight: 1.5 }}>{children}</div>
+    <div className="help-surface-card">
+      <div className="help-surface-card__label">{title}</div>
+      <div className="help-surface-card__body">{children}</div>
     </div>
   );
 }
 
 export default function HelpPage() {
   const router = useRouter();
+  const { locale, t } = useI18n();
+  const H = locale === "nl" ? helpNl : helpEn;
   const [ready, setReady] = useState(false);
   const [section, setSection] = useState<HelpSection>("overview");
+
+  const tabs = useMemo(
+    () =>
+      H.tabOrder.map((id) => ({
+        id,
+        label: H.tabs[id as keyof typeof H.tabs],
+      })),
+    [H]
+  );
 
   useEffect(() => {
     getSession()
@@ -199,51 +114,40 @@ export default function HelpPage() {
   useEffect(() => {
     if (!ready) return;
     const hash = (window.location.hash || "").replace(/^#/, "") as HelpSection;
-    const ok = TABS.some((t) => t.id === hash);
+    const ok = H.tabOrder.includes(hash);
     if (ok) setSection(hash);
-  }, [ready]);
+  }, [ready, H.tabOrder]);
 
   if (!ready) {
     return (
       <section className="page-shell">
-        <p>Checking session...</p>
+        <p>{t("common.checkingSession")}</p>
       </section>
     );
   }
 
   return (
-    <div style={{ maxWidth: 920, margin: "0 auto", padding: "24px 20px 48px" }}>
-      <h1 style={{ fontSize: "1.65rem", fontWeight: 600, margin: "0 0 8px", color: "var(--color-heading, var(--text))" }}>
-        Help — Atrio FM Chatbot
-      </h1>
-      <p style={{ ...p, color: "var(--muted)", marginBottom: 20 }}>
-        Administrator and user guide (English). For the full Polish handbook, see{" "}
-        <code style={{ fontSize: 13 }}>docs/admin_guide.md</code> or <code style={{ fontSize: 13 }}>docs/admin_guide.html</code>{" "}
-        in the repository.
+    <div className="content-narrow">
+      <h1 className="page-title-lead">{H.title}</h1>
+      <p className="help-prose text-muted" style={{ marginBottom: 20 }}>
+        {H.subtitleBeforeRepo}{" "}
+        <code style={{ fontSize: 13 }}>docs/admin_guide.md</code> or{" "}
+        <code style={{ fontSize: 13 }}>docs/admin_guide.html</code>{" "}
+        {H.subtitleAfterRepo}
       </p>
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 20 }}>
-        {TABS.map((t) => {
-          const active = section === t.id;
+      <div className="pill-tab-row">
+        {tabs.map((tab) => {
+          const active = section === tab.id;
           return (
             <button
-              key={t.id}
+              key={tab.id}
               type="button"
-              onClick={() => show(t.id)}
+              onClick={() => show(tab.id)}
               aria-current={active ? "true" : undefined}
-              style={{
-                border: active ? "1px solid var(--color-action-accent)" : "1px solid var(--border)",
-                background: active ? "color-mix(in srgb, var(--color-action-accent) 14%, transparent)" : "var(--surface)",
-                color: active ? "var(--color-action-accent)" : "var(--text)",
-                padding: "7px 14px",
-                borderRadius: 999,
-                fontSize: 13,
-                fontWeight: active ? 600 : 400,
-                cursor: "pointer",
-                fontFamily: "inherit",
-              }}
+              className={`pill-tab${active ? " pill-tab--active" : ""}`}
             >
-              {t.label}
+              {tab.label}
             </button>
           );
         })}
@@ -251,95 +155,72 @@ export default function HelpPage() {
 
       {section === "overview" && (
         <div>
-          <p style={p}>
-            Atrio FM Chatbot helps tenants and staff with building questions and service requests. Admins manage
-            tickets, users, knowledge documents, and quality improvements.
-          </p>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-              gap: 12,
-              margin: "16px 0",
-            }}
-          >
-            <Card title="Chat">Ask questions; the bot may create a service ticket when it detects a real issue.</Card>
-            <Card title="Admin">Tickets, knowledge gaps, users, documents, training data, and quality tools.</Card>
-            <Card title="Quality">Group errors, run evaluations, apply safe prompt tweaks without code.</Card>
+          <p className="help-prose">{H.overview.intro}</p>
+          <div className="help-card-grid" style={{ margin: "16px 0" }}>
+            {H.overview.cards.map((c) => (
+              <Card key={c.title} title={c.title}>
+                {c.body}
+              </Card>
+            ))}
           </div>
-          <h2 style={h2}>Where things live</h2>
+          <h2 className="help-h2">{H.overview.whereHeading}</h2>
           <DataTable
-            headers={["Route / tab", "Purpose", "Who"]}
-            rows={[
-              ["/chat", "Talk to the FM assistant", "Signed-in users"],
-              ["/dashboard", "Ticket list and filters", "Signed-in users"],
-              ["/admin → Tickets", "Resolution notes, classification overrides", "Admin"],
-              ["/admin → Knowledge gaps", "Questions the bot could not answer from docs", "Admin"],
-              ["/admin → Users", "Accounts and roles", "Admin"],
-              ["/admin → Documents", "Knowledge base files and reindex", "Admin"],
-              ["/admin/training", "Review training examples", "Admin"],
-              ["/admin/training-quality", "Eval runs, analyzer, prompt overrides", "Admin"],
-            ]}
+            headers={H.overview.whereTable.headers}
+            rows={H.overview.whereTable.rows}
           />
-          <Callout tone="info" title="First-time admin sign-in">
-            Open <code>/admin/login</code> (or use the main sign-in if your account is admin). Default username is often{" "}
-            <code>admin</code>; password is set by your technical contact.
+          <Callout
+            tone={calloutTone(H.overview.calloutSignIn.tone)}
+            title={H.overview.calloutSignIn.title}
+          >
+            {H.overview.calloutSignIn.body}
           </Callout>
-          <Callout tone="warn" title="Daily habit">
-            Check <strong>Knowledge gaps</strong> regularly. Each gap is a missing answer in your documentation.
+          <Callout
+            tone={calloutTone(H.overview.calloutDaily.tone)}
+            title={H.overview.calloutDaily.title}
+          >
+            {H.overview.calloutDaily.body}
           </Callout>
         </div>
       )}
 
       {section === "chat" && (
         <div>
-          <p style={{ ...p, color: "var(--muted)" }}>
-            <strong>Route:</strong> <code>/chat</code>
+          <p className="help-prose text-muted">
+            <strong>{H.chat.routeLine}</strong> <code>/chat</code>
           </p>
-          <h2 style={h2}>How to chat</h2>
-          <Steps
-            items={[
-              "Open Chat from the sidebar.",
-              "Type your question or issue at the bottom.",
-              "Press Enter or Send.",
-              "Read the reply, category, priority, and whether a ticket was created.",
-            ]}
-          />
-          <h2 style={h2}>When the bot usually creates a ticket</h2>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-            <Card title="Creates a ticket">
-              Physical fault, safety risk, HVAC / electrical / plumbing / elevators, clear repair need.
-            </Card>
-            <Card title="Often no ticket">
-              Hours, policies, “where is…”, thank-yous, status of an existing ticket (informational only).
-            </Card>
+          <h2 className="help-h2">{H.chat.howHeading}</h2>
+          <Steps items={H.chat.steps} />
+          <h2 className="help-h2">{H.chat.whenTicketHeading}</h2>
+          <div className="help-card-grid">
+            {H.chat.cards.map((c) => (
+              <Card key={c.title} title={c.title}>
+                {c.body}
+              </Card>
+            ))}
           </div>
-          <h2 style={h2}>Priorities (short)</h2>
+          <h2 className="help-h2">{H.chat.prioritiesHeading}</h2>
           <DataTable
-            headers={["Priority", "Use when", "Example"]}
-            rows={[
-              ["URGENT", "Immediate danger to people or property", "Fire, gas smell, flooding electrical hazard"],
-              ["HIGH", "Serious fault, same-day action", "No heat in winter, server room cooling down"],
-              ["NORMAL", "Annoying but not critical", "Stuck door, broken light in corridor"],
-              ["LOW", "Minor convenience", "Cosmetic fix, furniture swap"],
-            ]}
+            headers={H.chat.prioritiesTable.headers}
+            rows={H.chat.prioritiesTable.rows}
           />
-          <h3 style={h3}>“Create ticket anyway”</h3>
-          <p style={p}>
-            If the bot answered but you still need a ticket, use the button under the message (manual ticket).
-          </p>
-          <h3 style={h3}>New chat</h3>
-          <p style={p}>
-            Use <strong>New chat</strong> when you change topic. The bot remembers recent messages in the active thread.
-          </p>
-          <Callout tone="info" title="Rate limit">
-            Roughly 30 chat messages per minute per user. If you see “too many requests”, wait a minute.
+          <h3 className="help-h3">{H.chat.createAnywayHeading}</h3>
+          <p className="help-prose">{H.chat.createAnywayBody}</p>
+          <h3 className="help-h3">{H.chat.newChatHeading}</h3>
+          <p className="help-prose">{H.chat.newChatBody}</p>
+          <Callout
+            tone={calloutTone(H.chat.calloutRateLimit.tone)}
+            title={H.chat.calloutRateLimit.title}
+          >
+            {H.chat.calloutRateLimit.body}
           </Callout>
-          <Callout tone="danger" title="Do not">
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              <li>Rely on chat alone for life-safety emergencies — call your emergency line.</li>
-              <li>Spam the same question; it confuses context.</li>
-              <li>Assume a ticket exists without checking the dashboard.</li>
+          <Callout
+            tone={calloutTone(H.chat.calloutDoNot.tone)}
+            title={H.chat.calloutDoNot.title}
+          >
+            <ul className="help-callout-list">
+              {H.chat.calloutDoNot.list.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
             </ul>
           </Callout>
         </div>
@@ -347,44 +228,29 @@ export default function HelpPage() {
 
       {section === "dashboard" && (
         <div>
-          <p style={{ ...p, color: "var(--muted)" }}>
-            <strong>Route:</strong> <code>/dashboard</code>
+          <p className="help-prose text-muted">
+            <strong>{H.dashboard.routeLine}</strong> <code>/dashboard</code>
           </p>
-          <p style={p}>
-            Admins see all tickets; regular users see only their own. Use filters for category, priority, and status.
-          </p>
-          <h2 style={h2}>Change ticket status</h2>
-          <Steps
-            items={[
-              "Open a ticket row or detail.",
-              "Pick status: Open → In Progress → Resolved when work is confirmed.",
-            ]}
-          />
+          <p className="help-prose">{H.dashboard.intro}</p>
+          <h2 className="help-h2">{H.dashboard.changeStatusHeading}</h2>
+          <Steps items={H.dashboard.changeStatusSteps} />
           <DataTable
-            headers={["Status", "Meaning"]}
-            rows={[
-              ["Open", "New, not yet picked up"],
-              ["In Progress", "Someone is working on it"],
-              ["Resolved", "Fixed or closed with confirmation"],
-            ]}
+            headers={H.dashboard.statusTable.headers}
+            rows={H.dashboard.statusTable.rows}
           />
-          <h2 style={h2}>Admin: resolution notes</h2>
-          <p style={p}>
-            Under <code>/admin</code> → Tickets, add <strong>resolution notes</strong>: what was done, parts, cost, time
-            spent.
-          </p>
-          <h2 style={h2}>Admin: classification override</h2>
-          <p style={p}>
-            If the bot misclassified a ticket, use <strong>Classification override</strong> to fix category, priority,
-            or department. This is logged and feeds training data.
-          </p>
-          <p style={p}>
-            <strong>Export CSV</strong> exports what you currently see after filters.
-          </p>
-          <Callout tone="warn" title="Do not">
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              <li>Mark Resolved without confirmation from the technician.</li>
-              <li>Ignore URGENT tickets in the queue.</li>
+          <h2 className="help-h2">{H.dashboard.resolutionHeading}</h2>
+          <p className="help-prose">{H.dashboard.resolutionBody}</p>
+          <h2 className="help-h2">{H.dashboard.overrideHeading}</h2>
+          <p className="help-prose">{H.dashboard.overrideBody}</p>
+          <p className="help-prose">{H.dashboard.exportBody}</p>
+          <Callout
+            tone={calloutTone(H.dashboard.calloutDoNot.tone)}
+            title={H.dashboard.calloutDoNot.title}
+          >
+            <ul className="help-callout-list">
+              {H.dashboard.calloutDoNot.list.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
             </ul>
           </Callout>
         </div>
@@ -392,31 +258,27 @@ export default function HelpPage() {
 
       {section === "gaps" && (
         <div>
-          <p style={{ ...p, color: "var(--muted)" }}>
-            <strong>Route:</strong> <code>/admin</code> → <strong>Knowledge gaps</strong>
+          <p className="help-prose text-muted">
+            <strong>{H.gaps.routeLine}</strong>{" "}
+            <code>/admin/knowledge/gaps</code>
           </p>
-          <p style={p}>
-            Gaps are real user questions where the bot could not ground an answer in your FM documents. Closing a gap
-            improves answers for everyone.
-          </p>
-          <h2 style={h2}>Close a gap (typical flow)</h2>
-          <Steps
-            items={[
-              "Open the gap (or its detail page).",
-              "Set Doc name, e.g. building_hours.md.",
-              "Write Content in English (the assistant runs in English).",
-              "Choose append (add to file) or overwrite (replace entire file).",
-              "Enable Auto-reindex so the bot picks up the text immediately.",
-              "Click Resolve gap.",
-            ]}
-          />
-          <Callout tone="info" title="Tip">
-            Prefer <strong>append</strong> to existing topic files unless you are sure overwrite is safe.
+          <p className="help-prose">{H.gaps.intro}</p>
+          <h2 className="help-h2">{H.gaps.closeHeading}</h2>
+          <Steps items={H.gaps.steps} />
+          <Callout
+            tone={calloutTone(H.gaps.calloutTip.tone)}
+            title={H.gaps.calloutTip.title}
+          >
+            {H.gaps.calloutTip.body}
           </Callout>
-          <Callout tone="danger" title="Do not">
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              <li>Skip Auto-reindex and expect instant better answers.</li>
-              <li>Overwrite a large file without reading what is already there.</li>
+          <Callout
+            tone={calloutTone(H.gaps.calloutDoNot.tone)}
+            title={H.gaps.calloutDoNot.title}
+          >
+            <ul className="help-callout-list">
+              {H.gaps.calloutDoNot.list.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
             </ul>
           </Callout>
         </div>
@@ -424,109 +286,76 @@ export default function HelpPage() {
 
       {section === "documents" && (
         <div>
-          <p style={{ ...p, color: "var(--muted)" }}>
-            <strong>Route:</strong> <code>/admin</code> → <strong>Documents</strong>
+          <p className="help-prose text-muted">
+            <strong>{H.documents.routeLine}</strong>{" "}
+            <code>/admin/knowledge/documents</code>
           </p>
-          <p style={p}>
-            Markdown / text files in the FM corpus power retrieval. After any edit, run <strong>Reindex</strong> so
-            embeddings match the files.
-          </p>
-          <h2 style={h2}>Common doc files</h2>
+          <p className="help-prose">{H.documents.intro}</p>
+          <h2 className="help-h2">{H.documents.commonHeading}</h2>
           <DataTable
-            headers={["File", "Topic"]}
-            rows={[
-              ["01_building_general_info.md", "General building info"],
-              ["02_hvac_systems.md", "HVAC"],
-              ["03_electrical_systems.md", "Electrical"],
-              ["04_plumbing_water.md", "Plumbing / water"],
-              ["05_fire_safety_emergency.md", "Fire & emergency"],
-              ["06_security_access.md", "Security & access"],
-              ["07_parking_transport.md", "Parking & transport"],
-              ["08_it_network.md", "IT & network"],
-              ["09_elevators.md", "Elevators"],
-              ["10_cleaning_waste.md", "Cleaning & waste"],
-              ["11_meeting_rooms_spaces.md", "Meeting rooms"],
-              ["12_building_rules_policies.md", "Policies"],
-            ]}
+            headers={H.documents.filesTable.headers}
+            rows={H.documents.filesTable.rows}
           />
-          <h2 style={h2}>Upload</h2>
-          <p style={p}>
-            Supported: <code>.txt</code>, <code>.md</code>, <code>.csv</code>, <code>.pdf</code>, <code>.docx</code>.
-            Use Overwrite and Auto-reindex as needed.
-          </p>
-          <Callout tone="warn" title="Most common mistake">
-            Editing a document and forgetting <strong>Reindex</strong> — users still get old answers until you reindex.
+          <h2 className="help-h2">{H.documents.uploadHeading}</h2>
+          <p className="help-prose">{H.documents.uploadBody}</p>
+          <Callout
+            tone={calloutTone(H.documents.calloutMistake.tone)}
+            title={H.documents.calloutMistake.title}
+          >
+            {H.documents.calloutMistake.body}
           </Callout>
         </div>
       )}
 
       {section === "training" && (
         <div>
-          <p style={{ ...p, color: "var(--muted)" }}>
-            <strong>Route:</strong> <code>/admin/training</code>
+          <p className="help-prose text-muted">
+            <strong>{H.training.routeLine}</strong> <code>/admin/training</code>
           </p>
-          <p style={p}>
-            Review examples produced from chat/tests. Approving good rows and fixing bad ones builds a high-quality
-            dataset for future model work.
-          </p>
+          <p className="help-prose">{H.training.intro}</p>
           <DataTable
-            headers={["Filter", "Meaning"]}
-            rows={[
-              ["pending", "Needs human review"],
-              ["approved", "Accepted as correct"],
-              ["edited", "You corrected ideal output"],
-              ["rejected", "Not suitable for training"],
-            ]}
+            headers={H.training.filtersTable.headers}
+            rows={H.training.filtersTable.rows}
           />
-          <p style={p}>
-            Keyboard: <code>←</code> <code>→</code> navigate, <code>A</code> approve, <code>R</code> reject.
-          </p>
-          <Callout tone="warn" title="Do not">
-            Approve rows without checking category and priority. Bulk-reject pending without reading.
+          <p className="help-prose">{H.training.keyboardBody}</p>
+          <Callout
+            tone={calloutTone(H.training.calloutDoNot.tone)}
+            title={H.training.calloutDoNot.title}
+          >
+            {H.training.calloutDoNot.body}
           </Callout>
         </div>
       )}
 
       {section === "quality" && (
         <div>
-          <p style={{ ...p, color: "var(--muted)" }}>
-            <strong>Route:</strong> <code>/admin/training-quality</code>
+          <p className="help-prose text-muted">
+            <strong>{H.quality.routeLine}</strong>{" "}
+            <code>/admin/training-quality</code>
           </p>
-          <p style={p}>
-            <strong>Mismatch groups</strong> show error patterns. <strong>Run eval</strong> runs a batch test (~80
-            cases). <strong>Analyze pending</strong> asks the analyzer model for suggested prompt additions (cached,
-            rate-limited). <strong>Active overrides</strong> are live extra rules appended to the assistant instructions.
-          </p>
-          <h2 style={h2}>Suggested workflow</h2>
-          <Steps
-            items={[
-              "Run eval to capture a baseline score.",
-              "Review mismatch groups so you know what is failing.",
-              "Run Analyze pending; read each suggestion carefully.",
-              "Apply only changes you understand; edit text in the modal if needed.",
-              "Run eval again later and compare accuracy; rollback if metrics worsen.",
-            ]}
-          />
+          <p className="help-prose">{H.quality.intro}</p>
+          <h2 className="help-h2">{H.quality.workflowHeading}</h2>
+          <Steps items={H.quality.workflowSteps} />
           <DataTable
-            headers={["Constraint", "What to do"]}
-            rows={[
-              ["Only one eval at a time", "Wait for running to finish before starting another"],
-              ["Limited active overrides", "Rollback old rules before adding new ones if you hit the cap"],
-              ["Fresh eval may be required before apply", "Run eval if the UI says baseline is too old"],
-            ]}
+            headers={H.quality.constraintsTable.headers}
+            rows={H.quality.constraintsTable.rows}
           />
-          <Callout tone="danger" title="Do not">
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              <li>Apply overrides you do not understand.</li>
-              <li>Ignore accuracy deltas after a change.</li>
-              <li>Run heavy eval repeatedly during peak chat hours if your API quota is tight.</li>
+          <Callout
+            tone={calloutTone(H.quality.calloutDoNot.tone)}
+            title={H.quality.calloutDoNot.title}
+          >
+            <ul className="help-callout-list">
+              {H.quality.calloutDoNot.list.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
             </ul>
           </Callout>
         </div>
       )}
 
-      <footer style={{ marginTop: 36, paddingTop: 16, borderTop: "1px solid var(--border)", fontSize: 13, color: "var(--muted)" }}>
-        In-app Help (English) · Repository: <code>docs/admin_guide.md</code>, <code>docs/admin_guide.html</code>
+      <footer className="help-footer">
+        {H.footer} <code>docs/admin_guide.md</code>,{" "}
+        <code>docs/admin_guide.html</code>
       </footer>
     </div>
   );

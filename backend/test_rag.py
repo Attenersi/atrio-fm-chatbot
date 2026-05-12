@@ -1,3 +1,5 @@
+"""CLI: run RAG/API chat tests against a live server (HTTP) and write JSON report."""
+
 from __future__ import annotations
 
 import argparse
@@ -5,36 +7,32 @@ import json
 import re
 import sys
 import time
-import unicodedata
-from datetime import datetime, timezone
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.cookiejar import CookieJar
 from pathlib import Path
-from typing import Any, List, Union
+from typing import Any
 
-# Each entry: plain string (must appear) or list of strings (any one must appear).
-# `Union` (not `|`) so the module imports under Python 3.9 too.
-ResponseTokenSpec = Union[str, List[str]]
-TEST_OUTPUT_DIR = Path("tests")
-TEST_RESULTS_DIR = TEST_OUTPUT_DIR / "results"
-TEST_SUITES_DIR = TEST_OUTPUT_DIR / "suites"
+ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-
-@dataclass
-class TestCase:
-    id: str
-    category: str
-    message: str
-    expected_ticket_created: bool | None = None
-    expected_category: str | None = None
-    expected_priority: str | None = None
-    # If set, actual category must be one of these (instead of exact expected_category).
-    expected_category_any: list[str] | None = None
-    expected_priority_any: list[str] | None = None
-    expected_in_response: list[ResponseTokenSpec] | None = None
+from app.rag_eval import (  # noqa: E402
+    TEST_RESULTS_DIR,
+    ResponseTokenSpec,
+    TestCase,
+    build_builtin_cases,
+    build_diff,
+    build_test_cases_from_csv_bytes,
+    build_test_cases_from_json_path,
+    classify_failures,
+    coerce_expected_in_response,
+    coerce_str_list,
+    evaluate_case,
+    resolve_existing_path,
+)
 
 
 class Ansi:
@@ -46,233 +44,16 @@ class Ansi:
 
 
 def _safe_print(text: str) -> None:
-    """
-    Print helper resilient to Windows cp1250/cp1252 consoles when test messages contain emoji/Unicode.
-    """
     try:
         print(text)
     except UnicodeEncodeError:
-        # Replace unsupported glyphs so the run can continue and still preserve diagnostics.
         safe = text.encode("ascii", errors="replace").decode("ascii")
         print(safe)
-
-
-def normalize_answer_text(s: str) -> str:
-    s = unicodedata.normalize("NFKC", s)
-    s = s.replace("\xa0", " ").lower()
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
-def digits_only(s: str) -> str:
-    return re.sub(r"\D", "", s)
-
-
-def response_matches_token(text_norm: str, token: str) -> bool:
-    """
-    Match a single expected fragment against normalized assistant text.
-    Handles minor formatting variance (spacing) and digit-only substrings (phones, years).
-    """
-    if not token:
-        return True
-    t_raw = str(token).strip().lower()
-    if t_raw in text_norm:
-        return True
-    compact_text = re.sub(r"\s+", "", text_norm)
-    compact_tok = re.sub(r"\s+", "", t_raw)
-    if compact_tok and compact_tok in compact_text:
-        return True
-    digits_t = digits_only(t_raw)
-    if len(digits_t) >= 4:
-        d_text = digits_only(text_norm)
-        if digits_t in d_text:
-            return True
-        if digits_t.startswith("0") and len(digits_t) >= 8:
-            stripped = digits_t.lstrip("0") or digits_t
-            if len(stripped) >= 8 and stripped in d_text:
-                return True
-    return False
-
-
-def response_meets_token_spec(text_norm: str, spec: ResponseTokenSpec) -> bool:
-    if isinstance(spec, str):
-        return response_matches_token(text_norm, spec)
-    return any(response_matches_token(text_norm, alt) for alt in spec if alt)
-
-
-def coerce_expected_in_response(raw: Any) -> list[ResponseTokenSpec] | None:
-    """
-    JSON may list plain strings (all required) or inner arrays (alternatives / OR).
-    Example: ["always open", ["8 min", "8-minute"]] means both slots must match,
-    with the second satisfied by any listed synonym.
-    """
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        return [raw]
-    if not isinstance(raw, list):
-        return None
-    specs: list[ResponseTokenSpec] = []
-    for item in raw:
-        if isinstance(item, str):
-            specs.append(item)
-        elif isinstance(item, list):
-            alts = [str(x).strip() for x in item if str(x).strip()]
-            if alts:
-                specs.append(alts)
-        else:
-            specs.append(str(item))
-    return specs or None
-
-
-def coerce_str_list(raw: Any) -> list[str] | None:
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        s = raw.strip()
-        return [s] if s else None
-    if isinstance(raw, list):
-        out = [str(x).strip() for x in raw if str(x).strip()]
-        return out or None
-    return None
-
-
-def build_test_cases() -> list[TestCase]:
-    return [
-        # Informational (should not create tickets)
-        TestCase(
-            id="info-1",
-            category="informational",
-            message="What is the emergency evacuation procedure for building A?",
-            expected_ticket_created=False,
-        ),
-        TestCase(
-            id="info-2",
-            category="informational",
-            message="Where is visitor parking and what are the rules?",
-            expected_ticket_created=False,
-        ),
-        TestCase(
-            id="info-3",
-            category="informational",
-            message="What are the office opening hours on Fridays?",
-            expected_ticket_created=False,
-        ),
-        # Real maintenance (should create tickets)
-        TestCase(
-            id="maint-1",
-            category="maintenance",
-            message="The AC on floor 2 is not cooling and people are overheating.",
-            expected_ticket_created=True,
-            expected_category="HVAC",
-            expected_priority="HIGH",
-        ),
-        TestCase(
-            id="maint-2",
-            category="maintenance",
-            message="Water is leaking from the ceiling in room 104 near electrical lights.",
-            expected_ticket_created=True,
-            expected_category="Plumbing",
-            expected_priority="URGENT",
-        ),
-        TestCase(
-            id="maint-3",
-            category="maintenance",
-            message="Power outlet in conference room C sparks when used.",
-            expected_ticket_created=True,
-            expected_category="Electrical",
-            expected_priority="HIGH",
-        ),
-        # Edge cases (ambiguous)
-        TestCase(
-            id="edge-1",
-            category="edge",
-            message="Something feels off in the office, not sure what exactly.",
-            expected_ticket_created=None,
-        ),
-        TestCase(
-            id="edge-2",
-            category="edge",
-            message="Can you check if the building is okay? We heard a weird noise.",
-            expected_ticket_created=None,
-        ),
-        TestCase(
-            id="edge-3",
-            category="edge",
-            message="I think the air is weird maybe HVAC maybe nothing.",
-            expected_ticket_created=None,
-        ),
-    ]
-
-
-def build_test_cases_from_json(path: str) -> list[TestCase]:
-    raw = resolve_existing_path(path).read_text(encoding="utf-8")
-    data = json.loads(raw)
-    groups = data.get("groups", [])
-    out: list[TestCase] = []
-    for group in groups:
-        group_name = str(group.get("group", "unknown")).strip() or "unknown"
-        tests = group.get("tests", [])
-        for item in tests:
-            out.append(
-                TestCase(
-                    id=str(item.get("id", f"{group_name}-unknown")),
-                    category=group_name,
-                    message=str(item.get("message", "")),
-                    expected_ticket_created=item.get("should_create_ticket", None),
-                    expected_category=item.get("expected_category", None),
-                    expected_priority=item.get("expected_priority", None),
-                    expected_category_any=coerce_str_list(item.get("expected_category_any")),
-                    expected_priority_any=coerce_str_list(item.get("expected_priority_any")),
-                    expected_in_response=coerce_expected_in_response(item.get("expected_in_response")),
-                )
-            )
-    return out
 
 
 def parse_case_ids_file(path: str) -> set[str]:
     rows = resolve_existing_path(path).read_text(encoding="utf-8").splitlines()
     return {row.strip() for row in rows if row.strip()}
-
-
-def resolve_existing_path(path: str) -> Path:
-    candidate = Path(path)
-    if candidate.exists():
-        return candidate
-    if candidate.is_absolute():
-        return candidate
-    for base in (TEST_RESULTS_DIR, TEST_SUITES_DIR, TEST_OUTPUT_DIR):
-        alt = base / candidate
-        if alt.exists():
-            return alt
-        by_name = base / candidate.name
-        if by_name.exists():
-            return by_name
-        # Fuzzy fallback for renamed files like "DD.MM.YYYY, weird top10 cases.json".
-        target_phrase = re.sub(r"\s+", " ", candidate.stem.lower().replace("_", " ")).strip()
-        target_tokens = set(re.findall(r"[a-z0-9]+", target_phrase))
-        if not target_tokens and not target_phrase:
-            continue
-        matches: list[Path] = []
-        for entry in base.glob(f"*{candidate.suffix}"):
-            entry_phrase = re.sub(r"\s+", " ", entry.stem.lower()).strip()
-            entry_tokens = set(re.findall(r"[a-z0-9]+", entry_phrase))
-            if target_phrase and target_phrase in entry_phrase:
-                matches.append(entry)
-                continue
-            if target_tokens and target_tokens.issubset(entry_tokens):
-                matches.append(entry)
-        if matches:
-            # Prefer files that contain the literal phrase over token-only matches.
-            matches.sort(
-                key=lambda p: (
-                    target_phrase in re.sub(r"\s+", " ", p.stem.lower()).strip(),
-                    p.stat().st_mtime,
-                ),
-                reverse=True,
-            )
-            return matches[0]
-    return candidate
 
 
 class ApiClient:
@@ -338,14 +119,8 @@ def call_chat_with_retry(
     run_id: str = "",
     source_ref: str = "",
 ) -> tuple[dict[str, Any], int]:
-    """
-    Returns: (response, rate_limit_retries_used)
-    Raises exception if all retries fail or non-429 error occurs.
-    """
     retries_used = 0
-    attempt = 0
     while True:
-        attempt += 1
         try:
             return (
                 client.chat(
@@ -370,63 +145,6 @@ def call_chat_with_retry(
                 time.sleep(retry_wait_seconds)
                 continue
             raise
-
-
-def evaluate_case(case: TestCase, response: dict[str, Any]) -> tuple[bool, list[str]]:
-    failures: list[str] = []
-    actual_ticket = bool(response.get("ticket_created"))
-    actual_category = str(response.get("category", ""))
-    actual_priority = str(response.get("priority", ""))
-
-    if case.expected_ticket_created is not None and actual_ticket != case.expected_ticket_created:
-        failures.append(
-            f"ticket_created expected={case.expected_ticket_created} actual={actual_ticket}"
-        )
-    if case.expected_category_any:
-        if actual_category not in case.expected_category_any:
-            failures.append(
-                f"category expected one of={case.expected_category_any} actual={actual_category}"
-            )
-    elif case.expected_category and actual_category != case.expected_category:
-        failures.append(
-            f"category expected={case.expected_category} actual={actual_category}"
-        )
-    if case.expected_priority_any:
-        if actual_priority not in case.expected_priority_any:
-            failures.append(
-                f"priority expected one of={case.expected_priority_any} actual={actual_priority}"
-            )
-    elif case.expected_priority and actual_priority != case.expected_priority:
-        failures.append(
-            f"priority expected={case.expected_priority} actual={actual_priority}"
-        )
-    if case.expected_in_response:
-        text = normalize_answer_text(str(response.get("response", "")))
-        missing: list[str] = []
-        for spec in case.expected_in_response:
-            if not response_meets_token_spec(text, spec):
-                if isinstance(spec, list):
-                    missing.append("(" + " | ".join(spec) + ")")
-                else:
-                    missing.append(str(spec))
-        if missing:
-            failures.append(f"response missing tokens={missing}")
-
-    return (len(failures) == 0, failures)
-
-
-def classify_failures(failures: list[str]) -> list[str]:
-    kinds: list[str] = []
-    for f in failures:
-        if "timed out" in f:
-            kinds.append("timeout")
-        elif "429" in f or "Too Many Requests" in f:
-            kinds.append("rate_limit")
-        elif "request_error=" in f:
-            kinds.append("request_error")
-        else:
-            kinds.append("logic_mismatch")
-    return sorted(set(kinds))
 
 
 def compute_eta(start_ts: float, processed: int, total: int) -> tuple[float, float]:
@@ -460,7 +178,6 @@ def _slug_to_label(value: str) -> str:
 
 
 def _safe_file_fragment(value: str) -> str:
-    # Keep file names portable on Windows/macOS/Linux.
     cleaned = re.sub(r'[\\/:*?"<>|]+', " ", value)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned or "test run"
@@ -473,38 +190,25 @@ def _default_output_path(args: argparse.Namespace) -> Path:
         desc = _slug_to_label(args.run_id)
     elif args.cases_file.strip():
         desc = _slug_to_label(Path(args.cases_file).stem)
+    elif args.cases_csv.strip():
+        desc = _slug_to_label(Path(args.cases_csv).stem)
     else:
         desc = "builtin cases"
     filename = f"{date_label}, {_safe_file_fragment(desc)}.json"
     return TEST_RESULTS_DIR / filename
 
 
-def build_diff(previous_results: list[dict[str, Any]], current_results: list[dict[str, Any]]) -> dict[str, list[str]]:
-    prev = {str(r.get("id")): bool(r.get("pass")) for r in previous_results}
-    curr = {str(r.get("id")): bool(r.get("pass")) for r in current_results}
-    improved: list[str] = []
-    regressed: list[str] = []
-    still_failed: list[str] = []
-    for cid, now_ok in curr.items():
-        if cid not in prev:
-            continue
-        was_ok = prev[cid]
-        if (not was_ok) and now_ok:
-            improved.append(cid)
-        elif was_ok and (not now_ok):
-            regressed.append(cid)
-        elif (not was_ok) and (not now_ok):
-            still_failed.append(cid)
-    return {
-        "improved": sorted(improved),
-        "regressed": sorted(regressed),
-        "still_failed": sorted(still_failed),
-    }
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run RAG/API chat tests and output pass/fail report."
+        description="Run RAG/API chat tests and output pass/fail report.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Exit codes:
+  0  All cases passed and optional api_ok gates satisfied.
+  1  One or more cases failed (logic or assertions).
+  2  Unhandled runtime error (e.g. cannot reach API).
+  3  api_ok quality gate failed (--min-api-ok-pass-rate / --min-api-ok-count).
+""",
     )
     parser.add_argument("--base-url", default="http://localhost:8000", help="API base URL")
     parser.add_argument("--username", default="admin", help="Login username")
@@ -517,7 +221,12 @@ def main() -> int:
     parser.add_argument(
         "--cases-file",
         default="",
-        help="Optional path to JSON test suite (e.g. atrio_test_cases.json)",
+        help="Optional path to JSON test suite (e.g. tests/suites/ci_eval_smoke.json)",
+    )
+    parser.add_argument(
+        "--cases-csv",
+        default="",
+        help="Optional path to CSV test suite (id, message, optional expectation columns)",
     )
     parser.add_argument(
         "--timeout",
@@ -558,7 +267,32 @@ def main() -> int:
         default="",
         help="Optional run identifier stored with each /api/chat training example",
     )
+    parser.add_argument(
+        "--min-api-ok-pass-rate",
+        type=float,
+        default=None,
+        metavar="PCT",
+        help=(
+            "If set, require summary api_ok_pass_rate >= PCT (0-100). "
+            "Requires at least one api_ok response. Exit code 3 if not met."
+        ),
+    )
+    parser.add_argument(
+        "--min-api-ok-count",
+        type=int,
+        default=0,
+        metavar="N",
+        help="If > 0, require at least N api_ok responses. Exit code 3 if not met.",
+    )
     args = parser.parse_args()
+    if args.min_api_ok_pass_rate is not None and not (0.0 <= args.min_api_ok_pass_rate <= 100.0):
+        print("ERROR: --min-api-ok-pass-rate must be between 0 and 100.", file=sys.stderr)
+        return 2
+
+    sources = [bool(args.cases_file.strip()), bool(args.cases_csv.strip())]
+    if sum(sources) > 1:
+        print("ERROR: use at most one of --cases-file or --cases-csv.", file=sys.stderr)
+        return 2
 
     client = ApiClient(args.base_url, timeout_seconds=args.timeout)
 
@@ -568,9 +302,12 @@ def main() -> int:
     print(f"Authenticated: user={user_info.get('username')} role={user_info.get('role')}")
 
     if args.cases_file:
-        cases = build_test_cases_from_json(args.cases_file)
+        cases = build_test_cases_from_json_path(args.cases_file)
+    elif args.cases_csv:
+        csv_path = resolve_existing_path(args.cases_csv)
+        cases = build_test_cases_from_csv_bytes(csv_path.read_bytes())
     else:
-        cases = build_test_cases()
+        cases = build_builtin_cases()
     if args.case_ids_file:
         selected_ids = parse_case_ids_file(args.case_ids_file)
         before_count = len(cases)
@@ -590,6 +327,8 @@ def main() -> int:
     run_id = args.run_id.strip() or datetime.now(timezone.utc).strftime("testrun-%Y%m%dT%H%M%SZ")
     if args.cases_file:
         source_ref = resolve_existing_path(args.cases_file).name
+    elif args.cases_csv:
+        source_ref = resolve_existing_path(args.cases_csv).name
     else:
         source_ref = "builtin_cases"
 
@@ -784,7 +523,31 @@ def main() -> int:
         )
     print(f"Detailed results saved to: {output_path.resolve()}")
 
-    return 0 if failed == 0 else 1
+    exit_cases = 0 if failed == 0 else 1
+
+    if args.min_api_ok_count > 0:
+        if summary["api_ok_count"] < args.min_api_ok_count:
+            _safe_print(
+                f"{Ansi.RED}GATE: api_ok_count={summary['api_ok_count']} "
+                f"< --min-api-ok-count={args.min_api_ok_count}{Ansi.RESET}"
+            )
+            return 3
+
+    if args.min_api_ok_pass_rate is not None:
+        if summary["api_ok_count"] < 1:
+            _safe_print(
+                f"{Ansi.RED}GATE: no api_ok responses; cannot verify "
+                f"--min-api-ok-pass-rate={args.min_api_ok_pass_rate}{Ansi.RESET}"
+            )
+            return 3
+        if summary["api_ok_pass_rate"] < args.min_api_ok_pass_rate:
+            _safe_print(
+                f"{Ansi.RED}GATE: api_ok_pass_rate={summary['api_ok_pass_rate']}% "
+                f"< --min-api-ok-pass-rate={args.min_api_ok_pass_rate}{Ansi.RESET}"
+            )
+            return 3
+
+    return exit_cases
 
 
 if __name__ == "__main__":

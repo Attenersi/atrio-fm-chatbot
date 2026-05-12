@@ -1,0 +1,12 @@
+venv
+__pycache__
+.pytest_cache
+*.pyc
+*.pyo
+*.pyd
+*.db-shm
+*.db-wal
+tests/__pycache__
+app/__pycache__
+alembic/__pycache__
+*.log

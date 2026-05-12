@@ -8,6 +8,7 @@ export function MessageBubble({
   queryType,
   ticketCreated,
   ticketId,
+  ticketIds,
   sources,
   onCreateTicketAnyway,
   creatingTicket,
@@ -19,6 +20,7 @@ export function MessageBubble({
   queryType?: "INFORMATIONAL" | "SERVICE_REQUEST" | "INCIDENT" | "OUT_OF_SCOPE";
   ticketCreated?: boolean;
   ticketId?: number | null;
+  ticketIds?: number[];
   sources?: string[];
   onCreateTicketAnyway?: () => void;
   creatingTicket?: boolean;
@@ -35,21 +37,58 @@ export function MessageBubble({
       <div
         className="card"
         style={{
-          background: isUser ? "var(--color-chat-user-bg)" : "var(--color-chat-bot-bg)",
-          color: isUser ? "var(--color-chat-user-fg)" : "var(--color-chat-bot-fg)",
+          background: isUser
+            ? "var(--color-chat-user-bg)"
+            : "var(--color-chat-bot-bg)",
+          color: isUser
+            ? "var(--color-chat-user-fg)"
+            : "var(--color-chat-bot-fg)",
           padding: 12,
         }}
       >
         <div>{text}</div>
         {!isUser && (
           <>
-            <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+            <div
+              style={{
+                display: "flex",
+                gap: 8,
+                marginTop: 8,
+                flexWrap: "wrap",
+              }}
+            >
               {category ? <TicketBadge label={category} /> : null}
               {priority ? <TicketBadge label={priority} /> : null}
-              {queryType ? <TicketBadge label={queryType.replaceAll("_", " ")} /> : null}
+              {queryType ? (
+                <TicketBadge label={queryType.replaceAll("_", " ")} />
+              ) : null}
             </div>
-            {ticketId ? (
-              <p style={{ margin: "8px 0 0", fontSize: 13, color: "var(--chip-info-text)", fontWeight: 700 }}>
+            {ticketIds && ticketIds.length > 1 ? (
+              <p
+                style={{
+                  margin: "8px 0 0",
+                  fontSize: 13,
+                  color: "var(--chip-info-text)",
+                  fontWeight: 700,
+                }}
+              >
+                Tickets created:{" "}
+                {ticketIds.map((id, i) => (
+                  <span key={id}>
+                    #{id}
+                    {i < ticketIds.length - 1 ? ", " : ""}
+                  </span>
+                ))}
+              </p>
+            ) : ticketId ? (
+              <p
+                style={{
+                  margin: "8px 0 0",
+                  fontSize: 13,
+                  color: "var(--chip-info-text)",
+                  fontWeight: 700,
+                }}
+              >
                 Ticket created: #{ticketId}
               </p>
             ) : null}
@@ -64,7 +103,11 @@ export function MessageBubble({
                     onClick={onCreateTicketAnyway}
                     disabled={creatingTicket}
                     className="btn btn-ghost"
-                    style={{ width: "fit-content", fontSize: 12, padding: "6px 10px" }}
+                    style={{
+                      width: "fit-content",
+                      fontSize: 12,
+                      padding: "6px 10px",
+                    }}
                   >
                     {creatingTicket ? "Creating..." : "Create ticket anyway"}
                   </button>
@@ -72,7 +115,13 @@ export function MessageBubble({
               </div>
             ) : null}
             {sources && sources.length > 0 ? (
-              <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--muted)" }}>
+              <p
+                style={{
+                  margin: "8px 0 0",
+                  fontSize: 12,
+                  color: "var(--muted)",
+                }}
+              >
                 Sources: {sources.join(", ")}
               </p>
             ) : null}

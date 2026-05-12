@@ -16,7 +16,11 @@ export default function ChatPage() {
   }, [router]);
 
   if (!ready) {
-    return <section className="page-shell"><p>Checking session...</p></section>;
+    return (
+      <section className="page-shell">
+        <p>Checking session...</p>
+      </section>
+    );
   }
 
   return <ChatWindow />;

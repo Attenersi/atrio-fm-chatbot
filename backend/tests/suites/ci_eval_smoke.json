@@ -1,0 +1,26 @@
+{
+  "meta": {
+    "description": "Tiny suite for CI: two stable Meridian FAQ checks. Keep cases minimal to limit LLM cost and 429 risk."
+  },
+  "groups": [
+    {
+      "group": "ci_smoke",
+      "tests": [
+        {
+          "id": "CI-SMOKE-ADDR",
+          "message": "What's the building address?",
+          "should_create_ticket": false,
+          "expected_in_response": ["Graanstraat 12", "4811", "Breda"]
+        },
+        {
+          "id": "CI-SMOKE-RECEPTION",
+          "message": "What's the phone number for reception?",
+          "should_create_ticket": false,
+          "expected_in_response": [
+            ["076 555 0100", "76 555 01 00", "+31 76 555 01 00", "+31765550100", "0765550100", "555 0100"]
+          ]
+        }
+      ]
+    }
+  ]
+}

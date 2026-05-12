@@ -16,24 +16,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-# Reuse the existing scoring primitives.
-import sys
-
-_BACKEND_ROOT = Path(__file__).resolve().parent.parent
-if str(_BACKEND_ROOT) not in sys.path:
-    sys.path.insert(0, str(_BACKEND_ROOT))
-
-from test_rag import (  # noqa: E402  (intentional sys.path injection)
+from .rag_eval import (
     ResponseTokenSpec,
     TestCase,
     coerce_expected_in_response,
     coerce_str_list,
     evaluate_case,
 )
-
 from .classifier import fallback_response, parse_llm_json
-from .config import RAG_TOP_K
-from .rag import agenerate, retrieve_with_sources
+from .rag import agenerate, effective_rag_top_k, retrieve_with_sources
 
 
 _log = logging.getLogger("fm.eval")
@@ -128,7 +119,7 @@ async def _run_one(case: EvalCase) -> CaseResult:
         # Same call pattern as api_chat: retrieval is sync (Chroma), so push
         # it to a worker thread; LLM call is async.
         context, _sources = await asyncio.to_thread(
-            retrieve_with_sources, case.message, RAG_TOP_K
+            retrieve_with_sources, case.message, effective_rag_top_k()
         )
         raw = await agenerate(case.message, context, history=None)
         try:

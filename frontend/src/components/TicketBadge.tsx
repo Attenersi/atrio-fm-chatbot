@@ -1,5 +1,8 @@
 export function TicketBadge({ label }: { label: string }) {
-  const toneMap: Record<string, "danger" | "warn" | "info" | "success" | "neutral"> = {
+  const toneMap: Record<
+    string,
+    "danger" | "warn" | "info" | "success" | "neutral"
+  > = {
     URGENT: "danger",
     HIGH: "warn",
     NORMAL: "info",

@@ -19,6 +19,7 @@ type ChatMessage = {
   queryType?: "INFORMATIONAL" | "SERVICE_REQUEST" | "INCIDENT" | "OUT_OF_SCOPE";
   ticketCreated?: boolean;
   ticketId?: number | null;
+  ticketIds?: number[];
   sources?: string[];
 };
 
@@ -27,7 +28,9 @@ export function ChatWindow() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
-  const [creatingTicketIdx, setCreatingTicketIdx] = useState<number | null>(null);
+  const [creatingTicketIdx, setCreatingTicketIdx] = useState<number | null>(
+    null
+  );
 
   useEffect(() => {
     void (async () => {
@@ -52,7 +55,10 @@ export function ChatWindow() {
 
     const userText = input.trim();
     setInput("");
-    const nextMessages = [...messages, { role: "user" as const, text: userText }];
+    const nextMessages = [
+      ...messages,
+      { role: "user" as const, text: userText },
+    ];
     setMessages(nextMessages);
     setLoading(true);
 
@@ -90,6 +96,9 @@ export function ChatWindow() {
                 queryType: result.query_type,
                 ticketCreated: result.ticket_created,
                 ticketId: result.ticket_id,
+                ticketIds: result.ticket_ids?.length
+                  ? result.ticket_ids
+                  : undefined,
                 sources: result.used_sources ?? [],
               }
             : item
@@ -105,7 +114,10 @@ export function ChatWindow() {
         window.location.hostname !== "127.0.0.1"
           ? " If this device is not the machine running the API, set NEXT_PUBLIC_API_URL to the backend URL (same host as this page) and restart Next.js."
           : "";
-      const message = `Error contacting backend: ${detail}${hint}`.slice(0, 1200);
+      const message = `Error contacting backend: ${detail}${hint}`.slice(
+        0,
+        1200
+      );
       if (partial) {
         // Append error to the in-flight bot bubble so the user sees one
         // continuous turn instead of "half answer + new error bubble".
@@ -138,14 +150,21 @@ export function ChatWindow() {
         setMessages([]);
         setInput("");
       } catch {
-        setMessages((prev) => [...prev, { role: "bot", text: "Could not start a new chat. Please try again." }]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "bot",
+            text: "Could not start a new chat. Please try again.",
+          },
+        ]);
       }
     })();
   }
 
   async function createTicketAnyway(index: number) {
     const msg = messages[index];
-    if (!msg || msg.role !== "bot" || msg.ticketId || !msg.sourceMessage) return;
+    if (!msg || msg.role !== "bot" || msg.ticketId || !msg.sourceMessage)
+      return;
     setCreatingTicketIdx(index);
     try {
       const res = await createManualTicket({
@@ -170,7 +189,10 @@ export function ChatWindow() {
     } catch {
       setMessages((prev) => [
         ...prev,
-        { role: "bot", text: "Could not create manual ticket. Please try again." },
+        {
+          role: "bot",
+          text: "Could not create manual ticket. Please try again.",
+        },
       ]);
     } finally {
       setCreatingTicketIdx(null);
@@ -198,9 +220,12 @@ export function ChatWindow() {
               queryType={m.queryType}
               ticketCreated={m.ticketCreated}
               ticketId={m.ticketId}
+              ticketIds={m.ticketIds}
               sources={m.sources}
               onCreateTicketAnyway={
-                m.role === "bot" && m.ticketCreated === false ? () => createTicketAnyway(i) : undefined
+                m.role === "bot" && m.ticketCreated === false
+                  ? () => createTicketAnyway(i)
+                  : undefined
               }
               creatingTicket={creatingTicketIdx === i}
             />
@@ -223,11 +248,7 @@ export function ChatWindow() {
         >
           New chat
         </button>
-        <button
-          type="submit"
-          disabled={loading}
-          className="btn btn-primary"
-        >
+        <button type="submit" disabled={loading} className="btn btn-primary">
           {loading ? "Sending..." : "Send"}
         </button>
       </form>

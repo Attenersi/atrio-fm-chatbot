@@ -1,6 +1,9 @@
+"use client";
+
+import { useI18n } from "../i18n/I18nProvider";
 import { TicketBadge } from "./TicketBadge";
 
-const STATUS_FLOW = ["Open", "In Progress", "Resolved"];
+const STATUS_FLOW = ["Open", "In Progress", "Resolved"] as const;
 type SortKey = "id" | "created_at" | "priority" | "status";
 type SortDir = "asc" | "desc";
 
@@ -21,6 +24,15 @@ export function TicketTable({
   onSelectTicket?: (ticket: any) => void;
   showCreatedBy?: boolean;
 }) {
+  const { t } = useI18n();
+
+  function statusLabel(value: string) {
+    if (value === "Open") return t("dashboard.statusOpen");
+    if (value === "In Progress") return t("dashboard.statusInProgress");
+    if (value === "Resolved") return t("dashboard.statusResolved");
+    return value;
+  }
+
   function sortIndicator(key: SortKey) {
     if (sortKey !== key) return "";
     return sortDir === "asc" ? " ↑" : " ↓";
@@ -32,60 +44,89 @@ export function TicketTable({
         <thead>
           <tr>
             <th align="left">
-              <button className="btn btn-ghost" style={{ padding: "4px 8px" }} onClick={() => onSortChange("id")}>ID{sortIndicator("id")}</button>
+              <button
+                className="btn btn-ghost"
+                style={{ padding: "4px 8px" }}
+                onClick={() => onSortChange("id")}
+              >
+                {t("dashboard.colId")}
+                {sortIndicator("id")}
+              </button>
             </th>
-            <th align="left">Message</th>
-            <th align="left">Issue Summary</th>
-            {showCreatedBy ? <th align="left">Created by</th> : null}
-            <th align="left">Category</th>
+            <th align="left">{t("dashboard.colMessage")}</th>
+            <th align="left">{t("dashboard.colIssueSummary")}</th>
+            {showCreatedBy ? (
+              <th align="left">{t("dashboard.colCreatedBy")}</th>
+            ) : null}
+            <th align="left">{t("dashboard.colCategory")}</th>
             <th align="left">
-              <button className="btn btn-ghost" style={{ padding: "4px 8px" }} onClick={() => onSortChange("priority")}>
-                Priority{sortIndicator("priority")}
+              <button
+                className="btn btn-ghost"
+                style={{ padding: "4px 8px" }}
+                onClick={() => onSortChange("priority")}
+              >
+                {t("dashboard.colPriority")}
+                {sortIndicator("priority")}
               </button>
             </th>
             <th align="left">
-              <button className="btn btn-ghost" style={{ padding: "4px 8px" }} onClick={() => onSortChange("status")}>
-                Status{sortIndicator("status")}
+              <button
+                className="btn btn-ghost"
+                style={{ padding: "4px 8px" }}
+                onClick={() => onSortChange("status")}
+              >
+                {t("dashboard.colStatus")}
+                {sortIndicator("status")}
               </button>
             </th>
             <th align="left">
-              <button className="btn btn-ghost" style={{ padding: "4px 8px" }} onClick={() => onSortChange("created_at")}>
-                Created{sortIndicator("created_at")}
+              <button
+                className="btn btn-ghost"
+                style={{ padding: "4px 8px" }}
+                onClick={() => onSortChange("created_at")}
+              >
+                {t("dashboard.colCreated")}
+                {sortIndicator("created_at")}
               </button>
             </th>
           </tr>
         </thead>
         <tbody>
-          {tickets.map((t) => (
+          {tickets.map((row) => (
             <tr
-              key={t.id}
-              onClick={() => onSelectTicket?.(t)}
+              key={row.id}
+              onClick={() => onSelectTicket?.(row)}
               style={{ cursor: onSelectTicket ? "pointer" : "default" }}
             >
-              <td>{t.id}</td>
-              <td className="text-muted">"{t.message}"</td>
-              <td>{t.issue_summary || "-"}</td>
+              <td>{row.id}</td>
+              <td className="text-muted">"{row.message}"</td>
+              <td>{row.issue_summary || "-"}</td>
               {showCreatedBy ? (
-                <td>{t.created_by_username ?? (t.created_by_user_id != null ? `#${t.created_by_user_id}` : "—")}</td>
+                <td>
+                  {row.created_by_username ??
+                    (row.created_by_user_id != null
+                      ? t("dashboard.userNum", { id: row.created_by_user_id })
+                      : t("common.emDash"))}
+                </td>
               ) : null}
-              <td>{t.category}</td>
+              <td>{row.category}</td>
               <td>
-                <TicketBadge label={t.priority} />
+                <TicketBadge label={row.priority} />
               </td>
               <td>
                 <select
-                  value={t.status}
+                  value={row.status}
                   onClick={(e) => e.stopPropagation()}
-                  onChange={(e) => onStatusChange(t.id, e.target.value)}
+                  onChange={(e) => onStatusChange(row.id, e.target.value)}
                 >
                   {STATUS_FLOW.map((s) => (
                     <option key={s} value={s}>
-                      {s}
+                      {statusLabel(s)}
                     </option>
                   ))}
                 </select>
               </td>
-              <td>{new Date(t.created_at).toLocaleString()}</td>
+              <td>{new Date(row.created_at).toLocaleString()}</td>
             </tr>
           ))}
         </tbody>
